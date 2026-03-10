@@ -129,22 +129,93 @@ def init_system_data(db_path='trading_system.db'):
         # 4. 创建股票清单
         print("\n创建股票清单...")
         stocks_config = [
-            {"code": "SH600000", "name": "浦发银行", "initial_price": 10.50, "drift": 0.0001, "volatility": 0.15},
-            {"code": "SH600519", "name": "贵州茅台", "initial_price": 1680.00, "drift": 0.0002, "volatility": 0.18},
-            {"code": "SZ000001", "name": "平安银行", "initial_price": 15.30, "drift": 0.00005, "volatility": 0.20},
-            {"code": "SZ000858", "name": "五粮液", "initial_price": 180.50, "drift": 0.00015, "volatility": 0.22},
-            {"code": "SH601318", "name": "中国平安", "initial_price": 55.80, "drift": 0.0001, "volatility": 0.17},
-            {"code": "SZ002594", "name": "比亚迪", "initial_price": 268.00, "drift": 0.0003, "volatility": 0.30},
-            {"code": "SH688981", "name": "中芯国际", "initial_price": 55.00, "drift": 0.00025, "volatility": 0.28},
-            {"code": "SZ300750", "name": "宁德时代", "initial_price": 420.00, "drift": 0.0002, "volatility": 0.25},
-            {"code": "SH601988", "name": "中国银行", "initial_price": 4.20, "drift": 0.00003, "volatility": 0.12},
-            {"code": "SZ002475", "name": "立讯精密", "initial_price": 32.50, "drift": 0.00018, "volatility": 0.24}
+            {
+                "code": "SH600000", 
+                "name": "浦发银行", 
+                "description": "上海浦东发展银行，主营商业银行业务，包括存款、贷款、投资银行等金融服务",
+                "initial_price": 10.50, 
+                "drift": 0.0001, 
+                "volatility": 0.15
+            },
+            {
+                "code": "SH600519", 
+                "name": "贵州茅台", 
+                "description": "中国最大的白酒生产企业，主营高端白酒的生产与销售，品牌价值极高",
+                "initial_price": 1680.00, 
+                "drift": 0.0002, 
+                "volatility": 0.18
+            },
+            {
+                "code": "SZ000001", 
+                "name": "平安银行", 
+                "description": "全国性股份制商业银行，提供个人银行、公司银行、资产管理等综合金融服务",
+                "initial_price": 15.30, 
+                "drift": 0.00005, 
+                "volatility": 0.20
+            },
+            {
+                "code": "SZ000858", 
+                "name": "五粮液", 
+                "description": "中国知名白酒企业，以浓香型白酒为主，市场份额位居行业前列",
+                "initial_price": 180.50, 
+                "drift": 0.00015, 
+                "volatility": 0.22
+            },
+            {
+                "code": "SH601318", 
+                "name": "中国平安", 
+                "description": "综合性金融集团，业务涵盖保险、银行、投资等多个领域",
+                "initial_price": 55.80, 
+                "drift": 0.0001, 
+                "volatility": 0.17
+            },
+            {
+                "code": "SZ002594", 
+                "name": "比亚迪", 
+                "description": "全球领先的新能源汽车制造商，业务包括电动汽车、电池及光伏产品",
+                "initial_price": 268.00, 
+                "drift": 0.0003, 
+                "volatility": 0.30
+            },
+            {
+                "code": "SH688981", 
+                "name": "中芯国际", 
+                "description": "中国最大的集成电路制造企业，提供芯片代工服务",
+                "initial_price": 55.00, 
+                "drift": 0.00025, 
+                "volatility": 0.28
+            },
+            {
+                "code": "SZ300750", 
+                "name": "宁德时代", 
+                "description": "全球领先的动力电池制造商，为新能源汽车提供核心零部件",
+                "initial_price": 420.00, 
+                "drift": 0.0002, 
+                "volatility": 0.25
+            },
+            {
+                "code": "SH601988", 
+                "name": "中国银行", 
+                "description": "中国四大国有商业银行之一，业务网络遍布全球",
+                "initial_price": 4.20, 
+                "drift": 0.00003, 
+                "volatility": 0.12
+            },
+            {
+                "code": "SZ002475", 
+                "name": "立讯精密", 
+                "description": "全球知名的精密制造企业，主营消费电子产品的连接器及组件",
+                "initial_price": 32.50, 
+                "drift": 0.00018, 
+                "volatility": 0.24
+            }
         ]
         
         for config in stocks_config:
             stock = Stock(
                 stock_code=config["code"],
                 stock_name=config["name"],
+                description=config["description"],
                 initial_price=config["initial_price"],
                 drift=config["drift"],
                 volatility=config["volatility"],
@@ -160,9 +231,13 @@ def init_system_data(db_path='trading_system.db'):
             current_time=datetime(2024, 1, 1, 9, 30, 0),
             step_mode="day",
             step_count=0,
-            is_fast_forward=False
+            is_fast_forward=False,
+            last_report_year=2023,  # 初始化为2023年，2024年需要发布财报
+            requires_financial_report=False,
+            has_pending_news=False
         )
         session.add(system_state)
+        print("✓ 系统状态已初始化 (起始时间: 2024-01-01)")
         
         session.commit()
         print("\n" + "="*60)

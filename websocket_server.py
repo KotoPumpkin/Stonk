@@ -11,7 +11,8 @@ import websockets
 from websockets.server import WebSocketServerProtocol
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy import create_engine
-from models import User, Account, UserType, Position, Trade
+from models import (User, Account, UserType, Position, Trade, Stock, 
+                    FinancialReport, News, NewsImpact, SystemState)
 from trade_manager import TradeManager
 from price_engine import PriceEngine
 from strategy_engine import StrategyEngine
@@ -30,6 +31,20 @@ class MessageType(Enum):
     FAST_FORWARD_STOP = "FAST_FORWARD_STOP"    # 停止快进模式
     ERROR = "ERROR"                       # 错误消息
     HEARTBEAT = "HEARTBEAT"               # 心跳消息
+    
+    # 财报相关
+    FINANCIAL_REPORT_REQUIRED = "FINANCIAL_REPORT_REQUIRED"  # 需要发布财报
+    FINANCIAL_REPORT_SUBMIT = "FINANCIAL_REPORT_SUBMIT"      # 管理员提交财报
+    FINANCIAL_REPORT_PUBLISHED = "FINANCIAL_REPORT_PUBLISHED"  # 财报已发布
+    
+    # 新闻相关
+    NEWS_CREATE = "NEWS_CREATE"           # 管理员创建新闻
+    NEWS_PUBLISH = "NEWS_PUBLISH"         # 发布待发布的新闻
+    NEWS_CONFIRM = "NEWS_CONFIRM"         # 用户确认新闻
+    NEWS_BROADCAST = "NEWS_BROADCAST"     # 广播新闻
+    
+    # 股票管理
+    STOCK_UPDATE = "STOCK_UPDATE"         # 更新股票信息（含描述）
 
 
 class StepController:
@@ -70,6 +85,28 @@ class StepController:
         
         # 订单队列
         self.pending_orders: List[Dict] = []
+        
+        # 系统状态管理
+        self.init_system_state()
+        
+        # 待发布新闻的用户确认追踪
+        self.news_confirmations: Dict[int, Set[str]] = {}  # {news_id: set(user_ids)}
+    
+    def init_system_state(self):
+        """初始化或加载系统状态"""
+        system_state = self.session.query(SystemState).first()
+        if not system_state:
+            system_state = SystemState(
+                id=1,
+                current_time=datetime.now(),
+                step_mode='minute',
+                step_count=0,
+                last_report_year=datetime.now().year - 1,
+                requires_financial_report=False,
+                has_pending_news=False
+            )
+            self.session.add(system_state)
+            self.session.commit()
         
     async def broadcast(self, message: Dict, exclude: Optional[str] = None):
         """
@@ -343,14 +380,117 @@ class StepController:
                 "type": MessageType.FAST_FORWARD_STOP.value
             })
     
+    async def check_step_requirements(self) -> tuple[bool, str]:
+        """
+        检查步进前的要求
+        :return: (是否可以继续, 错误消息)
+        """
+        system_state = self.session.query(SystemState).first()
+        
+        # 检查是否需要发布财报
+        if system_state.requires_financial_report:
+            return False, "需要发布年度财报才能继续"
+        
+        # 检查是否有待发布的新闻需要所有人确认
+        if system_state.has_pending_news:
+            pending_news = self.session.query(News).filter(
+                News.is_published == True,
+                News.published_at.isnot(None)
+            ).all()
+            
+            for news in pending_news:
+                import json as json_lib
+                confirmed_users = json_lib.loads(news.confirmed_users)
+                # 检查是否所有在线真人用户都已确认
+                for user_id in self.human_users:
+                    if user_id not in confirmed_users:
+                        return False, f"所有用户必须确认新闻 '{news.title}' 才能继续"
+        
+        return True, ""
+    
+    def check_financial_report_requirement(self):
+        """检查是否需要发布年度财报"""
+        system_state = self.session.query(SystemState).first()
+        current_year = system_state.current_time.year
+        
+        # 检查是否跨年
+        if current_year > system_state.last_report_year:
+            # 检查所有股票是否都有该年度的财报
+            stocks = self.session.query(Stock).filter(Stock.is_active == True).all()
+            missing_reports = []
+            
+            for stock in stocks:
+                report = self.session.query(FinancialReport).filter(
+                    FinancialReport.stock_code == stock.stock_code,
+                    FinancialReport.year == current_year
+                ).first()
+                
+                if not report:
+                    missing_reports.append(stock.stock_code)
+            
+            if missing_reports:
+                system_state.requires_financial_report = True
+                self.session.commit()
+                return True, missing_reports
+        
+        return False, []
+    
+    def publish_pending_news(self):
+        """发布待发布的新闻"""
+        unpublished_news = self.session.query(News).filter(
+            News.is_published == False
+        ).all()
+        
+        if unpublished_news:
+            system_state = self.session.query(SystemState).first()
+            current_time = system_state.current_time
+            
+            for news in unpublished_news:
+                news.is_published = True
+                news.published_at = current_time
+                news.confirmed_users = '[]'  # 重置确认列表
+            
+            system_state.has_pending_news = True
+            self.session.commit()
+            return unpublished_news
+        
+        return []
+    
     async def execute_step(self):
         """
         执行步进
         """
+        # 检查步进要求
+        can_proceed, error_msg = await self.check_step_requirements()
+        if not can_proceed:
+            await self.broadcast({
+                "type": MessageType.ERROR.value,
+                "message": error_msg
+            })
+            return
+        
         self.is_waiting = False
         self.current_step += 1
         
         print(f"\n=== 执行步进 {self.current_step} ===")
+        
+        # 更新系统状态时间
+        system_state = self.session.query(SystemState).first()
+        
+        # 根据步进模式增加时间
+        step_mode = system_state.step_mode
+        if step_mode == 'minute':
+            from datetime import timedelta
+            system_state.current_time += timedelta(minutes=1)
+        elif step_mode == 'day':
+            from datetime import timedelta
+            system_state.current_time += timedelta(days=1)
+        elif step_mode == 'month':
+            from datetime import timedelta
+            system_state.current_time += timedelta(days=30)
+        
+        system_state.step_count = self.current_step
+        self.session.commit()
         
         # 1. 价格更新 - 使用step方法更新所有价格
         current_prices = self.price_engine.step(datetime.now(), save_klines=True)
@@ -379,7 +519,38 @@ class StepController:
         # 5. 提交数据库事务
         self.session.commit()
         
-        # 6. 广播更新
+        # 6. 检查是否需要发布财报
+        needs_report, missing_stocks = self.check_financial_report_requirement()
+        if needs_report:
+            await self.broadcast({
+                "type": MessageType.FINANCIAL_REPORT_REQUIRED.value,
+                "year": system_state.current_time.year,
+                "missing_stocks": missing_stocks
+            })
+        
+        # 7. 发布待发布的新闻
+        published_news = self.publish_pending_news()
+        if published_news:
+            news_data = []
+            for news in published_news:
+                news_data.append({
+                    "id": news.id,
+                    "title": news.title,
+                    "content": news.content,
+                    "stock_code": news.stock_code,
+                    "impact_type": news.impact_type.value,
+                    "impact_strength": news.impact_strength,
+                    "published_at": news.published_at.isoformat()
+                })
+                # 初始化确认追踪
+                self.news_confirmations[news.id] = set()
+            
+            await self.broadcast({
+                "type": MessageType.NEWS_BROADCAST.value,
+                "news": news_data
+            })
+        
+        # 8. 广播更新
         state = await self.get_current_state()
         await self.broadcast({
             "type": MessageType.STEP_UPDATE.value,
@@ -393,7 +564,7 @@ class StepController:
             }
         })
         
-        # 7. 重置状态，进入等待
+        # 9. 重置状态，进入等待
         self.ready_users.clear()
         
         if not self.is_fast_forward and len(self.human_users) > 0:
@@ -456,6 +627,249 @@ class StepController:
             "success": success,
             "message": msg,
             "order": order
+        })
+    
+    async def handle_financial_report_submit(self, user_id: str, report_data: Dict):
+        """
+        处理管理员提交财报
+        :param user_id: 用户ID
+        :param report_data: 财报数据
+        """
+        if user_id not in self.admin_users:
+            await self.send_to_user(user_id, {
+                "type": MessageType.ERROR.value,
+                "message": "只有管理员可以发布财报"
+            })
+            return
+        
+        stock_code = report_data.get('stock_code')
+        year = report_data.get('year')
+        content = report_data.get('content')
+        
+        if not stock_code or not year or not content:
+            await self.send_to_user(user_id, {
+                "type": MessageType.ERROR.value,
+                "message": "财报数据不完整"
+            })
+            return
+        
+        # 创建财报
+        system_state = self.session.query(SystemState).first()
+        report = FinancialReport(
+            stock_code=stock_code,
+            year=year,
+            content=content,
+            published_at=system_state.current_time
+        )
+        self.session.add(report)
+        
+        # 检查是否所有股票都有财报了
+        stocks = self.session.query(Stock).filter(Stock.is_active == True).all()
+        all_reported = True
+        for stock in stocks:
+            existing_report = self.session.query(FinancialReport).filter(
+                FinancialReport.stock_code == stock.stock_code,
+                FinancialReport.year == year
+            ).first()
+            if not existing_report and stock.stock_code != stock_code:
+                all_reported = False
+                break
+        
+        if all_reported:
+            system_state.requires_financial_report = False
+            system_state.last_report_year = year
+        
+        self.session.commit()
+        
+        # 广播财报发布
+        await self.broadcast({
+            "type": MessageType.FINANCIAL_REPORT_PUBLISHED.value,
+            "report": {
+                "stock_code": stock_code,
+                "year": year,
+                "content": content,
+                "published_at": report.published_at.isoformat()
+            },
+            "all_reported": all_reported
+        })
+    
+    async def handle_news_create(self, user_id: str, news_data: Dict):
+        """
+        处理管理员创建新闻
+        :param user_id: 用户ID
+        :param news_data: 新闻数据
+        """
+        if user_id not in self.admin_users:
+            await self.send_to_user(user_id, {
+                "type": MessageType.ERROR.value,
+                "message": "只有管理员可以创建新闻"
+            })
+            return
+        
+        title = news_data.get('title')
+        content = news_data.get('content')
+        stock_code = news_data.get('stock_code')  # 可为None
+        impact_type = news_data.get('impact_type')
+        impact_strength = news_data.get('impact_strength', 0.5)
+        
+        if not title or not content or not impact_type:
+            await self.send_to_user(user_id, {
+                "type": MessageType.ERROR.value,
+                "message": "新闻数据不完整"
+            })
+            return
+        
+        # 验证影响类型
+        try:
+            impact_enum = NewsImpact[impact_type.upper()]
+        except KeyError:
+            await self.send_to_user(user_id, {
+                "type": MessageType.ERROR.value,
+                "message": "无效的影响类型"
+            })
+            return
+        
+        # 创建新闻（待发布状态）
+        news = News(
+            title=title,
+            content=content,
+            stock_code=stock_code,
+            impact_type=impact_enum,
+            impact_strength=impact_strength,
+            is_published=False
+        )
+        self.session.add(news)
+        self.session.commit()
+        
+        # 通知管理员
+        await self.send_to_user(user_id, {
+            "type": "NEWS_CREATED",
+            "message": "新闻已创建，将在下一步开始时发布",
+            "news": {
+                "id": news.id,
+                "title": title,
+                "content": content,
+                "stock_code": stock_code,
+                "impact_type": impact_type,
+                "impact_strength": impact_strength
+            }
+        })
+    
+    async def handle_news_confirm(self, user_id: str, news_id: int):
+        """
+        处理用户确认新闻
+        :param user_id: 用户ID
+        :param news_id: 新闻ID
+        """
+        news = self.session.query(News).filter(News.id == news_id).first()
+        if not news or not news.is_published:
+            await self.send_to_user(user_id, {
+                "type": MessageType.ERROR.value,
+                "message": "新闻不存在或未发布"
+            })
+            return
+        
+        # 更新确认列表
+        import json as json_lib
+        confirmed_users = json_lib.loads(news.confirmed_users)
+        if user_id not in confirmed_users:
+            confirmed_users.append(user_id)
+            news.confirmed_users = json_lib.dumps(confirmed_users)
+            self.session.commit()
+        
+        # 更新确认追踪
+        if news_id in self.news_confirmations:
+            self.news_confirmations[news_id].add(user_id)
+        
+        # 检查是否所有真人用户都已确认
+        all_confirmed = all(
+            uid in confirmed_users for uid in self.human_users
+        )
+        
+        # 广播确认状态
+        await self.broadcast({
+            "type": "NEWS_CONFIRMED",
+            "news_id": news_id,
+            "user_id": user_id,
+            "confirmed_count": len(confirmed_users),
+            "total_count": len(self.human_users),
+            "all_confirmed": all_confirmed
+        })
+        
+        # 如果所有人都确认了，清除待确认状态
+        if all_confirmed:
+            system_state = self.session.query(SystemState).first()
+            # 检查是否还有其他待确认的新闻
+            other_pending = self.session.query(News).filter(
+                News.is_published == True,
+                News.id != news_id
+            ).all()
+            
+            has_other_pending = False
+            for other_news in other_pending:
+                other_confirmed = json_lib.loads(other_news.confirmed_users)
+                if not all(uid in other_confirmed for uid in self.human_users):
+                    has_other_pending = True
+                    break
+            
+            if not has_other_pending:
+                system_state.has_pending_news = False
+                self.session.commit()
+    
+    async def handle_stock_update(self, user_id: str, stock_data: Dict):
+        """
+        处理管理员更新股票信息（包括描述）
+        :param user_id: 用户ID
+        :param stock_data: 股票数据
+        """
+        if user_id not in self.admin_users:
+            await self.send_to_user(user_id, {
+                "type": MessageType.ERROR.value,
+                "message": "只有管理员可以更新股票信息"
+            })
+            return
+        
+        stock_code = stock_data.get('stock_code')
+        if not stock_code:
+            await self.send_to_user(user_id, {
+                "type": MessageType.ERROR.value,
+                "message": "缺少股票代码"
+            })
+            return
+        
+        stock = self.session.query(Stock).filter(
+            Stock.stock_code == stock_code
+        ).first()
+        
+        if not stock:
+            await self.send_to_user(user_id, {
+                "type": MessageType.ERROR.value,
+                "message": "股票不存在"
+            })
+            return
+        
+        # 更新字段
+        if 'stock_name' in stock_data:
+            stock.stock_name = stock_data['stock_name']
+        if 'description' in stock_data:
+            stock.description = stock_data['description']
+        if 'drift' in stock_data:
+            stock.drift = stock_data['drift']
+        if 'volatility' in stock_data:
+            stock.volatility = stock_data['volatility']
+        
+        self.session.commit()
+        
+        # 广播更新
+        await self.broadcast({
+            "type": MessageType.STOCK_UPDATE.value,
+            "stock": {
+                "stock_code": stock.stock_code,
+                "stock_name": stock.stock_name,
+                "description": stock.description,
+                "drift": stock.drift,
+                "volatility": stock.volatility
+            }
         })
 
 
@@ -543,6 +957,30 @@ class WebSocketServer:
                     "type": MessageType.HEARTBEAT.value,
                     "timestamp": datetime.now().isoformat()
                 })
+            
+            elif msg_type == MessageType.FINANCIAL_REPORT_SUBMIT.value:
+                await self.controller.handle_financial_report_submit(
+                    user_id, 
+                    data.get('report', {})
+                )
+            
+            elif msg_type == MessageType.NEWS_CREATE.value:
+                await self.controller.handle_news_create(
+                    user_id,
+                    data.get('news', {})
+                )
+            
+            elif msg_type == MessageType.NEWS_CONFIRM.value:
+                await self.controller.handle_news_confirm(
+                    user_id,
+                    data.get('news_id')
+                )
+            
+            elif msg_type == MessageType.STOCK_UPDATE.value:
+                await self.controller.handle_stock_update(
+                    user_id,
+                    data.get('stock', {})
+                )
         
         except Exception as e:
             print(f"处理消息时出错: {e}")

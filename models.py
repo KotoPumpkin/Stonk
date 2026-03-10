@@ -140,6 +140,9 @@ class Stock(Base):
     stock_code = Column(String(20), unique=True, nullable=False, index=True)
     stock_name = Column(String(100), nullable=False)
     
+    # 股票描述信息
+    description = Column(String(1000), nullable=True)  # 股票描述
+    
     # 价格生成参数（几何布朗运动）
     initial_price = Column(Float, nullable=False)  # 初始价格
     drift = Column(Float, default=0.0)  # 漂移率 μ
@@ -153,6 +156,9 @@ class Stock(Base):
     
     # 关联价格历史（一对多）
     price_history = relationship("PriceHistory", back_populates="stock", cascade="all, delete-orphan")
+    
+    # 关联财报（一对多）
+    financial_reports = relationship("FinancialReport", back_populates="stock", cascade="all, delete-orphan")
     
     def __repr__(self):
         return f"<Stock(code={self.stock_code}, name={self.stock_name}, price={self.initial_price})>"
@@ -223,6 +229,84 @@ class Trade(Base):
         return f"<Trade(account={self.account_id}, {self.trade_type} {self.quantity} {self.stock_code} @ {self.price})>"
 
 
+class FinancialReport(Base):
+    """
+    财报模型
+    存储股票的年度财报信息
+    """
+    __tablename__ = 'financial_reports'
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    stock_code = Column(String(20), ForeignKey('stocks.stock_code'), nullable=False, index=True)
+    
+    # 财报年份
+    year = Column(Integer, nullable=False, index=True)
+    
+    # 财报内容
+    content = Column(String(2000), nullable=False)
+    
+    # 发布时间
+    published_at = Column(DateTime, nullable=False)
+    
+    # 关联股票
+    stock = relationship("Stock", back_populates="financial_reports")
+    
+    # 联合唯一约束：每支股票每年只有一份财报
+    __table_args__ = (
+        {'sqlite_autoincrement': True},
+    )
+    
+    def __repr__(self):
+        return f"<FinancialReport(stock={self.stock_code}, year={self.year})>"
+
+
+class NewsImpact(enum.Enum):
+    """新闻影响类型枚举"""
+    POSITIVE = "positive"  # 积极影响
+    NEGATIVE = "negative"  # 消极影响
+    NEUTRAL = "neutral"  # 中性影响
+
+
+class News(Base):
+    """
+    新闻模型
+    存储影响机器人投资情绪的新闻
+    """
+    __tablename__ = 'news'
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    
+    # 新闻标题
+    title = Column(String(200), nullable=False)
+    
+    # 新闻内容
+    content = Column(String(2000), nullable=False)
+    
+    # 影响的股票代码（可为空，表示影响所有股票/市场）
+    stock_code = Column(String(20), nullable=True, index=True)
+    
+    # 影响类型
+    impact_type = Column(Enum(NewsImpact), nullable=False)
+    
+    # 影响强度（0.0-1.0）
+    impact_strength = Column(Float, default=0.5, nullable=False)
+    
+    # 创建时间（管理员插入新闻的时间）
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    
+    # 发布时间（下一步开始时发布）
+    published_at = Column(DateTime, nullable=True)
+    
+    # 是否已发布
+    is_published = Column(Boolean, default=False, index=True)
+    
+    # 确认该新闻的用户ID列表（JSON字符串）
+    confirmed_users = Column(String(500), default='[]')
+    
+    def __repr__(self):
+        return f"<News(id={self.id}, title={self.title}, impact={self.impact_type.value})>"
+
+
 class SystemState(Base):
     """
     系统状态模型
@@ -243,6 +327,15 @@ class SystemState(Base):
     
     # 是否处于快进状态
     is_fast_forward = Column(Boolean, default=False)
+    
+    # 上次年度财报检查的年份
+    last_report_year = Column(Integer, default=0)
+    
+    # 是否需要发布财报（阻塞步进）
+    requires_financial_report = Column(Boolean, default=False)
+    
+    # 是否有待发布的新闻（阻塞步进）
+    has_pending_news = Column(Boolean, default=False)
     
     # 最后更新时间
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
