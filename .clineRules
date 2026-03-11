@@ -319,6 +319,18 @@ Stonk/
 - 编写集成测试覆盖 WebSocket 通信流程
 - 编写 UI 测试覆盖关键交互路径
 
+### 9.7 Shell 命令规范
+所有 shell 命令应采用标准 PowerShell 兼容格式：
+- **使用 PowerShell 语法**：所有命令行脚本优先采用 PowerShell 兼容的写法
+- **跨平台兼容性**：优先使用 PowerShell Core 的跨平台命令
+- **命令示例**：
+  - `python` 或 `python.exe`（不使用 `py`）
+  - `Get-ChildItem` 而非 `ls`
+  - `Remove-Item` 而非 `rm`
+  - `Set-Location` 而非 `cd`（如必须改变目录，使用 `cd` 后跟 `&&` 连接后续命令）
+- **脚本扩展名**：推荐使用 `.ps1` 后缀的 PowerShell 脚本
+- **环境变量**：使用 `$env:VARIABLE_NAME` 访问环境变量（而非 `$VARIABLE_NAME`）
+
 ---
 
 ## 十、开发优先级和依赖

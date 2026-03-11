@@ -204,6 +204,98 @@ class WebSocketClient:
         
         return result["success"]
     
+    # ==================== Trading Methods ====================
+    
+    async def place_order(self, stock_code: str, side: str, quantity: int, price: float) -> Optional[str]:
+        """
+        下单。
+        
+        Args:
+            stock_code: 股票代码
+            side: 买卖方向 ("buy" or "sell")
+            quantity: 数量
+            price: 价格
+        
+        Returns:
+            订单 ID
+        """
+        order_event = asyncio.Event()
+        result = {"order_id": None}
+        
+        def handle_response(data: Dict[str, Any]) -> None:
+            result["order_id"] = data.get("order_id")
+            logger.info(f"Order placed: {result['order_id']}")
+            order_event.set()
+        
+        def handle_error(data: Dict[str, Any]) -> None:
+            logger.error(f"Place order error: {data.get('error')}")
+            order_event.set()
+        
+        # 临时注册处理器
+        self.message_handlers["SUCCESS"] = handle_response
+        self.message_handlers["ERROR"] = handle_error
+        
+        await self.send_message(MessageType.PLACE_ORDER, {
+            "stock_code": stock_code,
+            "side": side,
+            "quantity": quantity,
+            "price": price
+        })
+        
+        # 等待响应
+        try:
+            await asyncio.wait_for(order_event.wait(), timeout=10)
+        except asyncio.TimeoutError:
+            logger.error("Place order timeout")
+        
+        return result["order_id"]
+    
+    async def cancel_order(self, order_id: str) -> bool:
+        """
+        取消订单。
+        
+        Args:
+            order_id: 订单 ID
+        
+        Returns:
+            取消是否成功
+        """
+        cancel_event = asyncio.Event()
+        result = {"success": False}
+        
+        def handle_response(data: Dict[str, Any]) -> None:
+            result["success"] = True
+            logger.info(f"Order cancelled: {order_id}")
+            cancel_event.set()
+        
+        def handle_error(data: Dict[str, Any]) -> None:
+            logger.error(f"Cancel order error: {data.get('error')}")
+            cancel_event.set()
+        
+        # 临时注册处理器
+        self.message_handlers["SUCCESS"] = handle_response
+        self.message_handlers["ERROR"] = handle_error
+        
+        await self.send_message(MessageType.CANCEL_ORDER, {"order_id": order_id})
+        
+        # 等待响应
+        try:
+            await asyncio.wait_for(cancel_event.wait(), timeout=10)
+        except asyncio.TimeoutError:
+            logger.error("Cancel order timeout")
+        
+        return result["success"]
+    
+    async def mark_ready(self) -> bool:
+        """
+        标记用户就绪（步进控制）。
+        
+        Returns:
+            标记是否成功
+        """
+        await self.send_message(MessageType.USER_READY, {})
+        return True
+
     async def login(self, username: str, password: str) -> bool:
         """
         登录。

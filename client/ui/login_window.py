@@ -1,13 +1,13 @@
 """
 Stonk - 登录界面
 
-用户登录和注册界面。
+用户登录和注册界面，包含服务器地址连接功能。
 """
 
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame
 from PySide6.QtCore import Signal, Qt
 from client.ui.widgets import StylizedButton, StylizedLineEdit, StylizedLabel
-from client.config import COLORS
+from client.config import COLORS, SERVER_ADDRESS, SERVER_PORT_NUM
 
 
 class LoginWindow(QWidget):
@@ -16,11 +16,13 @@ class LoginWindow(QWidget):
     # 信号
     login_requested = Signal(str, str)  # username, password
     register_requested = Signal(str, str)  # username, password
+    connect_requested = Signal(str, int)  # host, port
     
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setStyleSheet(f"background-color: {COLORS['background']};")
         self.current_mode = "login"  # login 或 register
+        self._is_connected = False
         self.init_ui()
     
     def init_ui(self):
@@ -35,7 +37,74 @@ class LoginWindow(QWidget):
         self.title.setAlignment(Qt.AlignCenter)
         self.layout.addWidget(self.title)
         
-        # 内容容器
+        # ==================== 服务器连接区域 ====================
+        self.server_frame = QFrame()
+        self.server_frame.setStyleSheet(f"""
+            QFrame {{
+                background-color: {COLORS['panel']};
+                border-radius: 8px;
+                padding: 12px;
+            }}
+        """)
+        server_layout = QVBoxLayout()
+        server_layout.setSpacing(8)
+        
+        server_title = StylizedLabel("服务器连接")
+        server_title.setStyleSheet(f"""
+            QLabel {{
+                color: {COLORS['info']};
+                font-weight: bold;
+                font-size: 14px;
+            }}
+        """)
+        server_layout.addWidget(server_title)
+        
+        # 服务器地址输入行
+        addr_layout = QHBoxLayout()
+        addr_layout.setSpacing(8)
+        
+        addr_label = StylizedLabel("地址:")
+        addr_label.setFixedWidth(40)
+        addr_layout.addWidget(addr_label)
+        
+        self.server_host_input = StylizedLineEdit()
+        self.server_host_input.setPlaceholderText("服务器地址")
+        self.server_host_input.setText(SERVER_ADDRESS)
+        addr_layout.addWidget(self.server_host_input)
+        
+        port_label = StylizedLabel("端口:")
+        port_label.setFixedWidth(40)
+        addr_layout.addWidget(port_label)
+        
+        self.server_port_input = StylizedLineEdit()
+        self.server_port_input.setPlaceholderText("端口")
+        self.server_port_input.setText(str(SERVER_PORT_NUM))
+        self.server_port_input.setFixedWidth(80)
+        addr_layout.addWidget(self.server_port_input)
+        
+        self.connect_btn = StylizedButton("连接")
+        self.connect_btn.set_success_style()
+        self.connect_btn.setFixedWidth(80)
+        self.connect_btn.clicked.connect(self._on_connect_clicked)
+        addr_layout.addWidget(self.connect_btn)
+        
+        server_layout.addLayout(addr_layout)
+        
+        # 连接状态标签
+        self.connection_status_label = StylizedLabel("● 未连接")
+        self.connection_status_label.setStyleSheet(f"""
+            QLabel {{
+                color: {COLORS['danger']};
+                font-size: 12px;
+                padding: 4px 0px;
+            }}
+        """)
+        server_layout.addWidget(self.connection_status_label)
+        
+        self.server_frame.setLayout(server_layout)
+        self.layout.addWidget(self.server_frame)
+        
+        # ==================== 登录/注册内容区域 ====================
         self.content_layout = QVBoxLayout()
         self.content_layout.setSpacing(12)
         
@@ -46,6 +115,9 @@ class LoginWindow(QWidget):
         self.layout.addStretch()
         
         self.setLayout(self.layout)
+        
+        # 初始状态：禁用登录/注册表单
+        self._set_form_enabled(False)
     
     def _clear_content(self):
         """清空内容区"""
@@ -53,6 +125,18 @@ class LoginWindow(QWidget):
             item = self.content_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
+            elif item.layout():
+                # 递归清理子布局中的控件
+                self._clear_layout(item.layout())
+    
+    def _clear_layout(self, layout):
+        """递归清空布局"""
+        while layout.count():
+            item = layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+            elif item.layout():
+                self._clear_layout(item.layout())
     
     def _show_login_form(self):
         """显示登录表单"""
@@ -78,16 +162,19 @@ class LoginWindow(QWidget):
         button_layout = QHBoxLayout()
         button_layout.setSpacing(12)
         
-        login_btn = StylizedButton("登录")
-        login_btn.set_success_style()
-        login_btn.clicked.connect(self._on_login_clicked)
-        button_layout.addWidget(login_btn)
+        self.login_btn = StylizedButton("登录")
+        self.login_btn.set_success_style()
+        self.login_btn.clicked.connect(self._on_login_clicked)
+        button_layout.addWidget(self.login_btn)
         
-        register_btn = StylizedButton("注册新账户")
-        register_btn.clicked.connect(self._on_switch_to_register)
-        button_layout.addWidget(register_btn)
+        self.switch_to_register_btn = StylizedButton("注册新账户")
+        self.switch_to_register_btn.clicked.connect(self._on_switch_to_register)
+        button_layout.addWidget(self.switch_to_register_btn)
         
         self.content_layout.addLayout(button_layout)
+        
+        # 根据连接状态设置表单可用性
+        self._set_form_enabled(self._is_connected)
     
     def _show_register_form(self):
         """显示注册表单"""
@@ -121,16 +208,141 @@ class LoginWindow(QWidget):
         button_layout = QHBoxLayout()
         button_layout.setSpacing(12)
         
-        register_btn = StylizedButton("注册")
-        register_btn.set_success_style()
-        register_btn.clicked.connect(self._on_register_clicked)
-        button_layout.addWidget(register_btn)
+        self.register_btn = StylizedButton("注册")
+        self.register_btn.set_success_style()
+        self.register_btn.clicked.connect(self._on_register_clicked)
+        button_layout.addWidget(self.register_btn)
         
-        back_btn = StylizedButton("返回登录")
-        back_btn.clicked.connect(self._on_switch_to_login)
-        button_layout.addWidget(back_btn)
+        self.back_to_login_btn = StylizedButton("返回登录")
+        self.back_to_login_btn.clicked.connect(self._on_switch_to_login)
+        button_layout.addWidget(self.back_to_login_btn)
         
         self.content_layout.addLayout(button_layout)
+        
+        # 根据连接状态设置表单可用性
+        self._set_form_enabled(self._is_connected)
+    
+    def _set_form_enabled(self, enabled: bool):
+        """设置登录/注册表单的启用状态"""
+        if self.current_mode == "login":
+            if hasattr(self, 'login_username'):
+                self.login_username.setEnabled(enabled)
+            if hasattr(self, 'login_password'):
+                self.login_password.setEnabled(enabled)
+            if hasattr(self, 'login_btn'):
+                self.login_btn.setEnabled(enabled)
+            if hasattr(self, 'switch_to_register_btn'):
+                self.switch_to_register_btn.setEnabled(enabled)
+        elif self.current_mode == "register":
+            if hasattr(self, 'register_username'):
+                self.register_username.setEnabled(enabled)
+            if hasattr(self, 'register_password'):
+                self.register_password.setEnabled(enabled)
+            if hasattr(self, 'register_confirm'):
+                self.register_confirm.setEnabled(enabled)
+            if hasattr(self, 'register_btn'):
+                self.register_btn.setEnabled(enabled)
+            if hasattr(self, 'back_to_login_btn'):
+                self.back_to_login_btn.setEnabled(enabled)
+    
+    def _on_connect_clicked(self):
+        """处理连接按钮点击"""
+        host = self.server_host_input.text().strip()
+        port_text = self.server_port_input.text().strip()
+        
+        if not host:
+            self._show_error("请输入服务器地址")
+            return
+        
+        if not port_text:
+            self._show_error("请输入端口号")
+            return
+        
+        try:
+            port = int(port_text)
+            if port < 1 or port > 65535:
+                self._show_error("端口号必须在 1-65535 之间")
+                return
+        except ValueError:
+            self._show_error("端口号必须为数字")
+            return
+        
+        # 更新状态为连接中
+        self.connect_btn.setEnabled(False)
+        self.connect_btn.setText("连接中...")
+        self.server_host_input.setEnabled(False)
+        self.server_port_input.setEnabled(False)
+        self.connection_status_label.setText("● 连接中...")
+        self.connection_status_label.setStyleSheet(f"""
+            QLabel {{
+                color: {COLORS['warning']};
+                font-size: 12px;
+                padding: 4px 0px;
+            }}
+        """)
+        
+        # 发射连接请求信号
+        self.connect_requested.emit(host, port)
+    
+    def on_connect_success(self):
+        """连接成功回调"""
+        self._is_connected = True
+        self.connection_status_label.setText("● 已连接")
+        self.connection_status_label.setStyleSheet(f"""
+            QLabel {{
+                color: {COLORS['success']};
+                font-size: 12px;
+                padding: 4px 0px;
+            }}
+        """)
+        self.connect_btn.setText("已连接")
+        self.connect_btn.setEnabled(False)
+        self.server_host_input.setEnabled(False)
+        self.server_port_input.setEnabled(False)
+        
+        # 启用登录/注册表单
+        self._set_form_enabled(True)
+    
+    def on_connect_failure(self, error_message: str):
+        """连接失败回调"""
+        self._is_connected = False
+        self.connection_status_label.setText(f"● 连接失败")
+        self.connection_status_label.setStyleSheet(f"""
+            QLabel {{
+                color: {COLORS['danger']};
+                font-size: 12px;
+                padding: 4px 0px;
+            }}
+        """)
+        self.connect_btn.setText("连接")
+        self.connect_btn.setEnabled(True)
+        self.server_host_input.setEnabled(True)
+        self.server_port_input.setEnabled(True)
+        
+        # 禁用登录/注册表单
+        self._set_form_enabled(False)
+        
+        # 显示错误消息
+        self._show_error(error_message)
+    
+    def on_disconnected(self):
+        """断开连接回调（用于连接中断时重置状态）"""
+        self._is_connected = False
+        self.connection_status_label.setText("● 未连接")
+        self.connection_status_label.setStyleSheet(f"""
+            QLabel {{
+                color: {COLORS['danger']};
+                font-size: 12px;
+                padding: 4px 0px;
+            }}
+        """)
+        self.connect_btn.setText("连接")
+        self.connect_btn.setEnabled(True)
+        self.server_host_input.setEnabled(True)
+        self.server_port_input.setEnabled(True)
+        
+        # 禁用登录/注册表单
+        self._set_form_enabled(False)
     
     def _on_login_clicked(self):
         """处理登录按钮点击"""

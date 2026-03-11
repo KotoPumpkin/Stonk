@@ -17,6 +17,9 @@ from shared.utils import generate_id, get_timestamp
 from shared.constants import SERVER_HEARTBEAT_INTERVAL
 from server.models import DatabaseManager
 from server.config import HOST, PORT, HEARTBEAT_INTERVAL, CLIENT_HEARTBEAT_TIMEOUT
+from server.price_engine import PriceEngine
+from server.trade_manager import TradeManager
+from server.step_controller import StepController
 
 # 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -43,6 +46,11 @@ class StonkWebSocketServer:
         self.user_connections: Dict[str, WebSocketServerProtocol] = {}  # 用户 ID -> 连接
         self.room_users: Dict[str, Set[str]] = {}  # 房间 ID -> 用户 ID 集合
         self.user_last_heartbeat: Dict[str, float] = {}  # 用户 ID -> 最后心跳时间
+        
+        # 房间引擎管理
+        self.price_engines: Dict[str, PriceEngine] = {}  # 房间 ID -> 价格引擎
+        self.trade_managers: Dict[str, TradeManager] = {}  # 房间 ID -> 交易管理器
+        self.step_controllers: Dict[str, StepController] = {}  # 房间 ID -> 步进控制器
         
     async def initialize(self) -> None:
         """初始化服务器"""
@@ -143,6 +151,14 @@ class StonkWebSocketServer:
                 await self.handle_join_room(websocket, data)
             elif message_type == MessageType.LEAVE_ROOM:
                 await self.handle_leave_room(websocket, data)
+            elif message_type == MessageType.PLACE_ORDER:
+                await self.handle_place_order(websocket, data)
+            elif message_type == MessageType.CANCEL_ORDER:
+                await self.handle_cancel_order(websocket, data)
+            elif message_type == MessageType.USER_READY:
+                await self.handle_user_ready(websocket, data)
+            elif message_type == MessageType.STEP_FORWARD:
+                await self.handle_step_forward(websocket, data)
             else:
                 logger.warning(f"Unknown message type: {message_type}")
         
@@ -271,6 +287,7 @@ class StonkWebSocketServer:
         name = data.get("name")
         step_mode = data.get("step_mode")
         initial_capital = data.get("initial_capital", 100000)
+        stocks = data.get("stocks", [])  # 股票池
         
         if not name or not step_mode:
             await websocket.send(create_message(MessageType.ERROR, {"error": "Missing room name or step mode"}))
@@ -279,6 +296,10 @@ class StonkWebSocketServer:
         room_id = await self.db.create_room(name, step_mode, initial_capital)
         if room_id:
             self.room_users[room_id] = set()
+            
+            # 初始化房间引擎
+            await self._initialize_room_engines(room_id, stocks)
+            
             response = create_message(MessageType.SUCCESS, {"room_id": room_id})
             await websocket.send(response)
             logger.info(f"Room {room_id} created")
@@ -356,6 +377,199 @@ class StonkWebSocketServer:
                 ))
                 
                 logger.info(f"User {user_id} left room {room_id}")
+    
+    # ==================== Trading Handlers ====================
+    
+    async def handle_place_order(self, websocket: WebSocketServerProtocol, data: Dict[str, Any]) -> None:
+        """处理下单请求"""
+        if websocket not in self.clients:
+            return
+        
+        user_id = self.clients[websocket].get("user_id")
+        room_id = self.clients[websocket].get("room_id")
+        
+        if not user_id or not room_id:
+            await websocket.send(create_message(MessageType.ERROR, {"error": "Not in a room"}))
+            return
+        
+        stock_code = data.get("stock_code")
+        side = data.get("side")  # "buy" or "sell"
+        quantity = data.get("quantity")
+        price = data.get("price")
+        
+        if not all([stock_code, side, quantity, price]):
+            await websocket.send(create_message(MessageType.ERROR, {"error": "Missing order parameters"}))
+            return
+        
+        # 获取交易管理器
+        trade_manager = self.trade_managers.get(room_id)
+        if not trade_manager:
+            await websocket.send(create_message(MessageType.ERROR, {"error": "Room not initialized"}))
+            return
+        
+        # 下单
+        order = await trade_manager.place_order(user_id, stock_code, side, quantity, price)
+        if order:
+            response = create_message(MessageType.SUCCESS, {
+                "message": "Order placed successfully",
+                "order_id": order["id"]
+            }, room_id)
+            await websocket.send(response)
+            logger.info(f"User {user_id} placed order {order['id']} in room {room_id}")
+        else:
+            await websocket.send(create_message(MessageType.ERROR, {"error": "Failed to place order"}))
+    
+    async def handle_cancel_order(self, websocket: WebSocketServerProtocol, data: Dict[str, Any]) -> None:
+        """处理取消订单请求"""
+        if websocket not in self.clients:
+            return
+        
+        user_id = self.clients[websocket].get("user_id")
+        room_id = self.clients[websocket].get("room_id")
+        order_id = data.get("order_id")
+        
+        if not user_id or not room_id or not order_id:
+            await websocket.send(create_message(MessageType.ERROR, {"error": "Invalid request"}))
+            return
+        
+        trade_manager = self.trade_managers.get(room_id)
+        if not trade_manager:
+            await websocket.send(create_message(MessageType.ERROR, {"error": "Room not initialized"}))
+            return
+        
+        success = await trade_manager.cancel_order(order_id, user_id)
+        if success:
+            response = create_message(MessageType.SUCCESS, {"message": "Order cancelled"}, room_id)
+            await websocket.send(response)
+        else:
+            await websocket.send(create_message(MessageType.ERROR, {"error": "Failed to cancel order"}))
+    
+    async def handle_user_ready(self, websocket: WebSocketServerProtocol, data: Dict[str, Any]) -> None:
+        """处理用户就绪信号"""
+        if websocket not in self.clients:
+            return
+        
+        user_id = self.clients[websocket].get("user_id")
+        room_id = self.clients[websocket].get("room_id")
+        
+        if not user_id or not room_id:
+            return
+        
+        step_controller = self.step_controllers.get(room_id)
+        if not step_controller:
+            return
+        
+        # 标记用户就绪
+        await step_controller.mark_user_ready(user_id)
+        
+        # 检查是否所有用户都就绪
+        if await step_controller.all_users_ready():
+            await self._execute_step(room_id)
+    
+    async def handle_step_forward(self, websocket: WebSocketServerProtocol, data: Dict[str, Any]) -> None:
+        """处理步进请求（管理员）"""
+        room_id = data.get("room_id")
+        
+        if not room_id:
+            await websocket.send(create_message(MessageType.ERROR, {"error": "Missing room_id"}))
+            return
+        
+        step_controller = self.step_controllers.get(room_id)
+        if not step_controller:
+            await websocket.send(create_message(MessageType.ERROR, {"error": "Room not initialized"}))
+            return
+        
+        # 触发步进
+        await step_controller.initiate_step()
+        
+        # 广播进入决策期
+        await self.broadcast_to_room(room_id, create_message(
+            MessageType.DECISION_START,
+            {"message": "Decision period started"},
+            room_id
+        ))
+    
+    # ==================== Room Engine Management ====================
+    
+    async def _initialize_room_engines(self, room_id: str, stocks: List[str]) -> None:
+        """初始化房间引擎"""
+        # 初始化价格引擎
+        price_engine = PriceEngine(room_id, stocks)
+        await price_engine.initialize()
+        self.price_engines[room_id] = price_engine
+        
+        # 初始化交易管理器
+        trade_manager = TradeManager(self.db, room_id)
+        await trade_manager.initialize()
+        self.trade_managers[room_id] = trade_manager
+        
+        # 初始化步进控制器
+        step_controller = StepController(room_id, self.db)
+        await step_controller.initialize()
+        self.step_controllers[room_id] = step_controller
+        
+        logger.info(f"Engines initialized for room {room_id}")
+    
+    async def _execute_step(self, room_id: str) -> None:
+        """执行步进"""
+        price_engine = self.price_engines.get(room_id)
+        trade_manager = self.trade_managers.get(room_id)
+        step_controller = self.step_controllers.get(room_id)
+        
+        if not all([price_engine, trade_manager, step_controller]):
+            logger.error(f"Missing engines for room {room_id}")
+            return
+        
+        try:
+            # 1. 生成新价格
+            new_prices = await price_engine.generate_next_prices()
+            
+            # 2. 撮合交易
+            trades = await trade_manager.match_orders(new_prices)
+            
+            # 3. 更新账户资产
+            for user_id in self.room_users.get(room_id, set()):
+                await trade_manager.update_account_value(user_id, new_prices)
+            
+            # 4. 完成步进
+            await step_controller.complete_step()
+            
+            # 5. 广播更新
+            await self._broadcast_step_update(room_id, new_prices, trades)
+            
+            logger.info(f"Step executed for room {room_id}")
+        
+        except Exception as e:
+            logger.error(f"Error executing step for room {room_id}: {e}")
+    
+    async def _broadcast_step_update(self, room_id: str, prices: Dict[str, float], trades: List[Dict]) -> None:
+        """广播步进更新"""
+        # 广播价格更新
+        price_message = create_message(MessageType.PRICE_UPDATE, {
+            "prices": prices,
+            "timestamp": get_timestamp()
+        }, room_id)
+        await self.broadcast_to_room(room_id, price_message)
+        
+        # 广播交易记录
+        if trades:
+            trade_message = create_message(MessageType.TRADE_EXECUTED, {
+                "trades": trades
+            }, room_id)
+            await self.broadcast_to_room(room_id, trade_message)
+        
+        # 更新每个用户的账户信息
+        trade_manager = self.trade_managers.get(room_id)
+        if trade_manager:
+            for user_id in self.room_users.get(room_id, set()):
+                account = await trade_manager.get_account_snapshot(user_id)
+                if user_id in self.user_connections:
+                    websocket = self.user_connections[user_id]
+                    account_message = create_message(MessageType.ACCOUNT_UPDATE, account, room_id)
+                    try:
+                        await websocket.send(account_message)
+                    except Exception as e:
+                        logger.error(f"Error sending account update to {user_id}: {e}")
     
     # ==================== Helper Methods ====================
     
