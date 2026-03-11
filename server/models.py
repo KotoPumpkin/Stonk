@@ -451,6 +451,232 @@ class DatabaseManager:
             print(f"Error listing stocks: {e}")
             return []
     
+    async def get_stock_by_code(self, code: str) -> Optional[Dict[str, Any]]:
+        """根据股票代码获取股票信息"""
+        try:
+            cursor = await self.connection.cursor()
+            await cursor.execute("""
+                SELECT id, code, name, initial_price, issued_shares, description 
+                FROM Stocks WHERE code = ?
+            """, (code,))
+            
+            row = await cursor.fetchone()
+            if not row:
+                return None
+            
+            stock_id, stock_code, name, initial_price, issued_shares, description = row
+            return {
+                "id": stock_id,
+                "code": stock_code,
+                "name": name,
+                "initial_price": initial_price,
+                "issued_shares": issued_shares,
+                "description": description
+            }
+        except Exception as e:
+            print(f"Error getting stock by code: {e}")
+            return None
+    
+    async def update_stock(
+        self,
+        stock_id: str,
+        code: Optional[str] = None,
+        name: Optional[str] = None,
+        initial_price: Optional[float] = None,
+        issued_shares: Optional[int] = None,
+        description: Optional[str] = None
+    ) -> bool:
+        """
+        更新股票信息。
+        
+        Args:
+            stock_id: 股票 ID
+            code: 新代码（可选）
+            name: 新名称（可选）
+            initial_price: 新初始价格（可选）
+            issued_shares: 新发行数量（可选）
+            description: 新描述（可选）
+            
+        Returns:
+            是否更新成功
+        """
+        try:
+            cursor = await self.connection.cursor()
+            
+            # 构建动态更新语句
+            updates = []
+            values = []
+            
+            if code is not None:
+                updates.append("code = ?")
+                values.append(code)
+            if name is not None:
+                updates.append("name = ?")
+                values.append(name)
+            if initial_price is not None:
+                updates.append("initial_price = ?")
+                values.append(initial_price)
+            if issued_shares is not None:
+                updates.append("issued_shares = ?")
+                values.append(issued_shares)
+            if description is not None:
+                updates.append("description = ?")
+                values.append(description)
+            
+            if not updates:
+                return True  # 没有需要更新的字段
+            
+            updates.append("updated_at = ?")
+            values.append(time.time())
+            values.append(stock_id)
+            
+            sql = f"UPDATE Stocks SET {', '.join(updates)} WHERE id = ?"
+            await cursor.execute(sql, values)
+            await self.connection.commit()
+            return True
+        except Exception as e:
+            print(f"Error updating stock: {e}")
+            return False
+    
+    async def delete_stock(self, stock_id: str) -> bool:
+        """
+        删除股票。
+        
+        Args:
+            stock_id: 股票 ID
+            
+        Returns:
+            是否删除成功
+        """
+        try:
+            cursor = await self.connection.cursor()
+            await cursor.execute("DELETE FROM Stocks WHERE id = ?", (stock_id,))
+            await self.connection.commit()
+            return True
+        except Exception as e:
+            print(f"Error deleting stock: {e}")
+            return False
+    
+    # ==================== Room Stock Operations ====================
+    
+    async def add_stock_to_room(
+        self,
+        room_id: str,
+        stock_id: str,
+        current_price: float
+    ) -> bool:
+        """
+        添加股票到房间。
+        
+        Args:
+            room_id: 房间 ID
+            stock_id: 股票 ID
+            current_price: 当前价格
+            
+        Returns:
+            是否添加成功
+        """
+        try:
+            cursor = await self.connection.cursor()
+            await cursor.execute("""
+                INSERT OR REPLACE INTO RoomStocks (room_id, stock_id, current_price)
+                VALUES (?, ?, ?)
+            """, (room_id, stock_id, current_price))
+            await self.connection.commit()
+            return True
+        except Exception as e:
+            print(f"Error adding stock to room: {e}")
+            return False
+    
+    async def remove_stock_from_room(self, room_id: str, stock_id: str) -> bool:
+        """
+        从房间移除股票。
+        
+        Args:
+            room_id: 房间 ID
+            stock_id: 股票 ID
+            
+        Returns:
+            是否移除成功
+        """
+        try:
+            cursor = await self.connection.cursor()
+            await cursor.execute("""
+                DELETE FROM RoomStocks WHERE room_id = ? AND stock_id = ?
+            """, (room_id, stock_id))
+            await self.connection.commit()
+            return True
+        except Exception as e:
+            print(f"Error removing stock from room: {e}")
+            return False
+    
+    async def list_room_stocks(self, room_id: str) -> List[Dict[str, Any]]:
+        """
+        列出房间内的所有股票。
+        
+        Args:
+            room_id: 房间 ID
+            
+        Returns:
+            股票列表
+        """
+        try:
+            cursor = await self.connection.cursor()
+            await cursor.execute("""
+                SELECT s.id, s.code, s.name, s.initial_price, s.issued_shares, s.description,
+                       rs.current_price
+                FROM Stocks s
+                INNER JOIN RoomStocks rs ON s.id = rs.stock_id
+                WHERE rs.room_id = ?
+            """, (room_id,))
+            
+            rows = await cursor.fetchall()
+            stocks = []
+            for row in rows:
+                stock_id, code, name, initial_price, issued_shares, description, current_price = row
+                stocks.append({
+                    "id": stock_id,
+                    "code": code,
+                    "name": name,
+                    "initial_price": initial_price,
+                    "issued_shares": issued_shares,
+                    "description": description,
+                    "current_price": current_price
+                })
+            return stocks
+        except Exception as e:
+            print(f"Error listing room stocks: {e}")
+            return []
+    
+    async def update_room_stock_price(
+        self,
+        room_id: str,
+        stock_id: str,
+        current_price: float
+    ) -> bool:
+        """
+        更新房间内股票的当前价格。
+        
+        Args:
+            room_id: 房间 ID
+            stock_id: 股票 ID
+            current_price: 新价格
+            
+        Returns:
+            是否更新成功
+        """
+        try:
+            cursor = await self.connection.cursor()
+            await cursor.execute("""
+                UPDATE RoomStocks SET current_price = ?
+                WHERE room_id = ? AND stock_id = ?
+            """, (current_price, room_id, stock_id))
+            await self.connection.commit()
+            return True
+        except Exception as e:
+            print(f"Error updating room stock price: {e}")
+            return False
+    
     # ==================== Robot Operations ====================
     
     async def create_robot(self, room_id: str, name: str, strategy_type: str, 
