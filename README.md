@@ -1,33 +1,232 @@
-# STONK：多模态时间步进金融仿真与量化策略演练平台
+# Stonk - 股票模拟交易系统
 
-## 平台概述
+一款基于 **C/S 架构** 的 Windows 桌面端股票模拟交易程序。系统支持多房间并行会话，允许管理员干预市场、管理机器人策略，并支持真人用户进行手动交易或量化代理交易。
 
-STONK 是一款基于客户端-服务器（C/S）架构的专业级金融模拟系统。本平台突破了传统股票模拟器对现实时间流的依赖，构建了一个由管理员（上帝视角）全权掌控的**封闭式金融沙盒环境**。
+## 🎯 项目特性
 
-STONK 旨在为金融从业者、量化策略开发者及投资爱好者提供一个高保真、多维度的策略回测与实操演练平台。系统通过抽象化的时间步进机制，实现了从微观市场微观结构到宏观长周期演化的全频谱模拟，支持多用户并发联机与智能体（Agent）协同博弈。
+### 三大角色
+- **管理员** (Server 端一体化)：最高权限，创建房间、管理股票、控制步进、发布新闻/财报、管控机器人
+- **真人账户** (Client 端)：登录后进入大厅加入房间，执行买卖操作、查看盈亏
+- **机器人账户** (虚拟交易者)：由服务器自动生成，遵循三种策略类型
 
-## 系统架构与核心范式
+### 核心功能
+✅ 房间隔离与多人联机  
+✅ 四种步进模式（秒/时/天/月）与快进功能  
+✅ 双向交易（做多/做空）与简化撮合  
+✅ 机器人策略与自动交易  
+✅ 新闻与财报发布系统  
+✅ 管理员实时干预与参数调整  
 
-STONK 采用严格的**异步步进（Turn-based）架构**。与传统实时交易系统不同，本平台将时间离散化为独立的“步进单位”（Step）。所有市场状态的更新、订单的撮合以及价格的生成，均在管理员触发“下一步”后同步发生。这种设计确保了数据的一致性与实验的可复现性，为量化策略的公平评测提供了理想环境。
+## 🛠 技术栈
 
-平台定义了三种核心实体角色，构成动态市场生态：
+| 模块 | 技术 |
+|------|------|
+| **架构** | C/S 架构、WebSocket + JSON |
+| **后端** | Python asyncio、SQLite |
+| **前端** | PySide6 (Qt for Python) |
+| **图表** | QtCharts (K线、折线图、指标) |
+| **安全** | SHA-256 + Salt 密码加密 |
 
-- **管理员（上帝模式）**：拥有系统的最高控制权。管理员不仅负责维护股票池、配置账户初始参数（资金、策略绑定），更是时间流的掌控者。通过控制台，管理员可动态切换四种时间粒度模式，并触发“快进”（Fast Forward）指令，强制系统在无人工干预下高速演进，以进行长期压力测试。
-- **智能交易体（机器人账户）**：预置了三类基于行为金融学建模的交易策略（散户游资、正规机构、做空/做多组织）。这些智能体在每个步进单位内，依据当前市场数据与内置逻辑自动生成订单，模拟真实市场中不同参与者的博弈行为。
-- **终端交易员（真人账户）**：支持多用户通过客户端接入。用户可在符合当前时间模式的步进间隙内，进行手动交易、查看持仓与资金状况。系统特别设计了**量化代理（Quant Agent）接口**，允许用户在高频或快进场景下，接入自动化策略辅助决策，实现人机协同。
+## 📦 项目结构
 
-## 多维时间尺度模拟引擎
+```
+Stonk/
+├── server/                 # 服务器端包
+│   ├── __init__.py
+│   ├── config.py           # ✅ 服务器配置
+│   ├── websocket_server.py # WebSocket 服务器
+│   ├── models.py           # 数据模型
+│   ├── price_engine.py     # 价格生成引擎
+│   ├── strategy_engine.py  # 机器人策略引擎
+│   ├── trade_manager.py    # 交易撮合引擎
+│   ├── admin_tools.py      # 管理员工具
+│   └── admin_ui.py         # 管理员 UI
+├── client/                 # 客户端包
+│   ├── __init__.py
+│   ├── config.py           # ✅ 客户端配置
+│   ├── websocket_client.py # WebSocket 客户端
+│   └── ui/
+│       ├── __init__.py
+│       ├── main_window.py
+│       ├── login_window.py
+│       ├── lobby_window.py
+│       ├── trading_window.py
+│       └── widgets.py
+├── shared/                 # 共享模块包
+│   ├── __init__.py
+│   ├── constants.py        # ✅ 常量与枚举定义
+│   ├── message_protocol.py # ✅ 消息协议工厂
+│   └── utils.py            # ✅ 工具函数（密码、ID、时间戳）
+├── .clineRules             # ✅ 全局开发准则
+├── MEMORY.md               # ✅ 开发进度跟踪
+├── requirements.txt        # ✅ 依赖列表
+└── README.md               # ✅ 项目说明
+```
 
-STONK 的核心创新在于其**多模态时间步进引擎**，该引擎允许用户在四个数量级上验证策略的有效性：
+## 🚀 快速开始
 
-- **超短线模式（秒级步进）**：模拟高频交易环境。在此模式下，由于时间窗口极短，系统强制禁用真人手动操作（仅保留观察与代理模式），专注于测试算法策略在极端速度下的表现。
-- **较短线与短线模式（小时/天级步进）**：对应传统的日内交易与波段操作。这是人机交互的核心场景，系统提供完整的K线图与技术指标分析工具，支持用户在有限理性的时间压力下做出决策。
-- **中线模式（月级步进）**：模拟长周期价值投资。该模式下，宏观时间以月推进，但系统内部仍保留天级的微观结算精度（即机器人在月内仍按天交易），从而在宏观视角下保留了微观市场的流动性特征，避免了简单的数据插值。
+### 1. 环境准备
 
-## 专业分析与交易功能
+```bash
+# 克隆项目
+git clone https://github.com/KotoPumpkin/Stonk.git
+cd Stonk
 
-为满足专业用户的分析需求，STONK 配备了工业级的数据可视化与交易工具链：
+# 创建虚拟环境（可选）
+python -m venv venv
+venv\Scripts\activate  # Windows
 
-- **动态图表系统**：基于 Qt Charts 构建，支持分钟、小时、日、月 K线图的无缝切换。除超短线模式外，系统均支持叠加 MACD、KDJ 等经典技术指标，辅助用户进行多维度技术分析。
-- **双向交易机制**：系统完整支持做多（Long）与做空（Short）逻辑，允许账户持有负仓位，真实还原了衍生品与现货市场的双向博弈环境。
-- **数据持久化与回溯**：所有交易记录、持仓变化及市场行情均通过 SQLite 进行持久化存储。管理员可随时复盘历史步进数据，分析策略在特定市场环境下的盈亏归因。
+# 安装依赖
+pip install -r requirements.txt
+```
+
+### 2. 启动服务器
+
+```bash
+# 服务器和管理员 UI 一体化
+python -m server.websocket_server
+```
+
+### 3. 启动客户端
+
+```bash
+# 客户端
+python -m client.ui.main_window
+```
+
+## 📋 核心概念
+
+### 步进模式
+
+| 模式 | 单位 | 真人操作 | 机器人行为 | 图表 |
+|------|------|--------|---------|------|
+| 超短线 | 秒 | 禁止（仅观看） | 高频 | 折线图 |
+| 较短线 | 小时 | 允许 | 中频 | K线+指标 |
+| 短线 | 天 | 允许 | 低频 | K线+指标 |
+| 中线 | 月 | 允许 | 按天决策 | K线+指标 |
+
+### 机器人策略
+
+1. **散户游资** (Retail)
+   - 高频交易、追涨杀跌
+   - 受新闻情绪影响剧烈
+   - 换手率高
+
+2. **正规机构** (Institution)
+   - 价值导向、低换手率
+   - 对财报数据敏感
+   - 稳定持仓
+
+3. **做空/做多组织** (Short/Long)
+   - 趋势追踪
+   - 明显的单边操作倾向
+   - 风险承受能力高
+
+## 🔧 配置说明
+
+### 服务器配置 (`server/config.py`)
+
+```python
+# WebSocket 服务器
+HOST = "localhost"
+PORT = 8765
+
+# 房间与用户限制
+MAX_ROOMS = 100
+MAX_USERS_PER_ROOM = 50
+
+# 交易参数
+TRADING_COMMISSION_RATE = 0.001  # 0.1% 手续费
+PRICE_VOLATILITY = 0.02           # 2% 波动率
+```
+
+### 客户端配置 (`client/config.py`)
+
+```python
+# 服务器连接
+SERVER_ADDRESS = "localhost"
+SERVER_PORT_NUM = 8765
+
+# UI 主题
+COLORS = {
+    "background": "#1a1a1a",
+    "success": "#00ff00",
+    "danger": "#ff0000",
+}
+```
+
+## 📊 共享模块
+
+### Constants (`shared/constants.py`)
+定义枚举类型：
+- `StepMode` - 步进模式
+- `RoomStatus` - 房间状态
+- `RobotStrategyType` - 机器人策略
+- `OrderDirection` - 订单方向
+- `NewsSentiment` - 新闻情绪
+
+### Message Protocol (`shared/message_protocol.py`)
+定义消息协议：
+- `MessageType` - 所有消息类型枚举
+- `create_message()` - 创建消息工厂函数
+- `parse_message()` - 解析消息函数
+- `validate_message()` - 验证消息有效性
+
+### Utils (`shared/utils.py`)
+提供工具函数：
+- 密码加密：`hash_password()`, `verify_password()`
+- ID 生成：`generate_user_id()`, `generate_room_id()`
+- 时间戳：`get_timestamp()`
+
+## 📝 开发阶段
+
+### ✅ Phase 1：基础架构 (当前)
+- [x] 项目目录结构
+- [x] 共享模块（常量、协议、工具函数）
+- [x] 服务器/客户端配置
+- [ ] 数据模型定义
+- [ ] WebSocket 通信框架
+- [ ] 用户认证与会话管理
+- [ ] 基础 UI 框架
+
+### 🔜 Phase 2-5
+详见 [MEMORY.md](MEMORY.md#二开发阶段规划)
+
+## 📖 文档
+
+- **[.clineRules](.clineRules)** - 全局开发准则与系统设计规范
+- **[MEMORY.md](MEMORY.md)** - 开发进度跟踪与 API 文档
+- **[PySide6 文档](https://doc.qt.io/qtforpython/)** - UI 框架参考
+- **[Python asyncio](https://docs.python.org/3/library/asyncio.html)** - 异步编程参考
+
+## 🤝 贡献指南
+
+1. Fork 项目
+2. 创建特性分支 (`git checkout -b feature/AmazingFeature`)
+3. 提交更改 (`git commit -m '[Phase] [Module] 功能描述'`)
+4. 推送到分支 (`git push origin feature/AmazingFeature`)
+5. 开启 Pull Request
+
+### 提交规范
+
+```
+[Phase] [Module] 简短描述
+
+详细说明（可选）
+
+关联 Issue: #123
+```
+
+## ⚖️ 许可证
+
+MIT License
+
+## 📧 联系方式
+
+- 项目主页：https://github.com/KotoPumpkin/Stonk
+- 问题反馈：通过 GitHub Issues
+
+---
+
+**最后更新**：2026-03-11  
+**版本**：1.0.0 (Pre-release)
