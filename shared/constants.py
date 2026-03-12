@@ -44,7 +44,10 @@ class NewsSentiment(Enum):
     NEUTRAL = "neutral"           # 中立
 
 # ==================== 服务器配置常量 ====================
-SERVER_HOST: Final[str] = "localhost"
+# 服务器绑定地址：使用 0.0.0.0 允许所有网络接口访问，避免 IPv6/IPv4 解析问题
+SERVER_HOST: Final[str] = "0.0.0.0"
+# 客户端连接的地址（可使用 localhost 或 127.0.0.1）
+SERVER_CONNECT_HOST: Final[str] = "127.0.0.1"
 SERVER_PORT: Final[int] = 8765
 SERVER_MAX_ROOMS: Final[int] = 100
 SERVER_MAX_USERS_PER_ROOM: Final[int] = 50

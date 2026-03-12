@@ -390,6 +390,8 @@ class StonkWebSocketServer:
                 
                 response = create_message(MessageType.SUCCESS, {
                     "room_id": room_id,
+                    "name": room["name"],
+                    "step_mode": room["step_mode"],
                     "message": "Joined room successfully"
                 }, room_id)
                 await websocket.send(response)

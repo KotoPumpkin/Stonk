@@ -15,8 +15,8 @@ from shared.constants import (
 
 # ==================== WebSocket 服务器配置 ====================
 
-# 服务器监听地址和端口
-HOST = SERVER_HOST
+# 服务器监听地址和端口（使用 0.0.0.0 绑定所有网络接口）
+HOST = SERVER_HOST  # 0.0.0.0
 PORT = SERVER_PORT
 
 # 最大房间数和每个房间的最大用户数

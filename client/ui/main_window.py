@@ -15,6 +15,7 @@ from client.ui.lobby_window import LobbyWindow
 from client.ui.trading_window import TradingWindow
 from client.websocket_client import WebSocketClient
 from client.config import WINDOW_WIDTH, WINDOW_HEIGHT
+from shared.message_protocol import MessageType
 
 logger = logging.getLogger(__name__)
 
@@ -31,10 +32,11 @@ class AsyncSignalBridge(QObject):
     register_success = Signal()
     register_failure = Signal(str)
     rooms_loaded = Signal(list)
-    room_joined = Signal(str)
+    room_joined = Signal(dict)   # 携带 {room_id, name, step_mode}
     room_join_failed = Signal(str)
     room_created = Signal()
     room_create_failed = Signal(str)
+    news_received = Signal(str, str, float)  # title, content, timestamp
 
 
 class StonkMainWindow(QMainWindow):
@@ -106,6 +108,7 @@ class StonkMainWindow(QMainWindow):
         self.bridge.room_join_failed.connect(self._handle_room_join_failed)
         self.bridge.room_created.connect(self._handle_room_created)
         self.bridge.room_create_failed.connect(self._handle_room_create_failed)
+        self.bridge.news_received.connect(self._handle_news_received)
     
     # ==================== 连接处理 ====================
     
@@ -254,9 +257,10 @@ class StonkMainWindow(QMainWindow):
         """处理加入房间请求"""
         async def async_join():
             try:
-                if await self.client.join_room(room_id):
+                room_info = await self.client.join_room(room_id)
+                if room_info:
                     logger.info(f"Joined room {room_id}")
-                    self.bridge.room_joined.emit(room_id)
+                    self.bridge.room_joined.emit(room_info)
                 else:
                     self.bridge.room_join_failed.emit("加入房间失败")
             except Exception as e:
@@ -266,14 +270,45 @@ class StonkMainWindow(QMainWindow):
         if self.client_loop:
             asyncio.run_coroutine_threadsafe(async_join(), self.client_loop)
     
-    def _handle_room_joined(self, room_id: str):
+    def _handle_room_joined(self, room_info: dict):
         """处理加入房间成功（UI 线程）"""
+        room_id = room_info.get("room_id", "")
+        room_name = room_info.get("name", room_id)
+        step_mode = room_info.get("step_mode", "day")
+
         self.trading_window = TradingWindow(self.client, room_id)
         self.stacked.addWidget(self.trading_window)
         self.stacked.setCurrentWidget(self.trading_window)
-        
+
+        # 立即更新左上角房间信息
+        self.trading_window.update_room_info(room_name, step_mode, 0)
+
         # 连接交易窗口信号
         self.trading_window.exit_room_requested.connect(self._on_exit_room)
+
+        # 注册消息处理器
+        self._register_trading_message_handlers()
+
+    def _register_trading_message_handlers(self):
+        """注册交易窗口的消息处理器"""
+        # 使用 MessageType 枚举注册新闻广播处理器（修复：原来传字符串导致 AttributeError）
+        self.client.register_message_handler(
+            MessageType.NEWS_BROADCAST,
+            self._on_news_broadcast
+        )
+
+    def _on_news_broadcast(self, data: dict):
+        """处理新闻广播消息（在异步线程中调用，通过信号转发到 UI 线程）"""
+        title = data.get("title", "")
+        content = data.get("content", "")
+        timestamp = data.get("published_at", 0)
+        # 通过 Qt 信号跨线程安全地更新 UI
+        self.bridge.news_received.emit(title, content, float(timestamp))
+
+    def _handle_news_received(self, title: str, content: str, timestamp: float):
+        """在 UI 主线程中将新闻追加到交易窗口"""
+        if self.trading_window:
+            self.trading_window.add_news(title, content, timestamp)
     
     def _handle_room_join_failed(self, error_message: str):
         """处理加入房间失败（UI 线程）"""

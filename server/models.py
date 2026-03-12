@@ -858,8 +858,9 @@ class DatabaseManager:
             cursor = await self.connection.cursor()
             now = time.time()
             
+            # 使用 INSERT OR REPLACE 处理用户重复加入的情况
             await cursor.execute("""
-                INSERT INTO RoomUsers (room_id, user_id, initial_capital, current_cash, joined_at)
+                INSERT OR REPLACE INTO RoomUsers (room_id, user_id, initial_capital, current_cash, joined_at)
                 VALUES (?, ?, ?, ?, ?)
             """, (room_id, user_id, initial_capital, initial_capital, now))
             

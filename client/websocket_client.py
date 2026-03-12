@@ -154,15 +154,19 @@ class WebSocketClient:
             except Exception as e:
                 logger.error(f"Error in heartbeat task: {e}")
     
-    def register_message_handler(self, message_type: MessageType, callback: Callable) -> None:
+    def register_message_handler(self, message_type, callback: Callable) -> None:
         """
         注册消息处理器。
         
         Args:
-            message_type: 消息类型
+            message_type: 消息类型（MessageType 枚举或字符串均可）
             callback: 处理函数
         """
-        self.message_handlers[message_type.value] = callback
+        if isinstance(message_type, MessageType):
+            key = message_type.value
+        else:
+            key = str(message_type)
+        self.message_handlers[key] = callback
     
     # ==================== Auth Methods ====================
     
@@ -418,7 +422,7 @@ class WebSocketClient:
         
         return result["room_id"]
     
-    async def join_room(self, room_id: str) -> bool:
+    async def join_room(self, room_id: str) -> Optional[Dict[str, Any]]:
         """
         加入房间。
         
@@ -426,13 +430,16 @@ class WebSocketClient:
             room_id: 房间 ID
         
         Returns:
-            加入是否成功
+            成功时返回包含 room_id、name、step_mode 的字典，失败返回 None
         """
         join_event = asyncio.Event()
-        result = {"success": False}
+        result = {"success": False, "room_id": None, "name": "", "step_mode": "day"}
         
         def handle_response(data: Dict[str, Any]) -> None:
             result["success"] = True
+            result["room_id"] = data.get("room_id")
+            result["name"] = data.get("name", "")
+            result["step_mode"] = data.get("step_mode", "day")
             self.room_id = data.get("room_id")
             logger.info(f"Joined room {self.room_id}")
             join_event.set()
@@ -453,7 +460,13 @@ class WebSocketClient:
         except asyncio.TimeoutError:
             logger.error("Join room timeout")
         
-        return result["success"]
+        if result["success"]:
+            return {
+                "room_id": result["room_id"],
+                "name": result["name"],
+                "step_mode": result["step_mode"]
+            }
+        return None
     
     async def leave_room(self, room_id: str) -> bool:
         """

@@ -607,6 +607,56 @@ Total All:                  168 tests - PASSED (Phase 1 + Phase 2 + Phase 3)
 
 ---
 
+## 十三、跨机器网络支持 (2026-03-12)
+
+### 已完成的工作
+1. ✅ **客户端配置支持环境变量** - 可通过 `STONK_SERVER_HOST` 和 `STONK_SERVER_PORT` 指定远程服务器
+2. ✅ **启动脚本更新** - BAT 和 PS1 脚本均支持配置服务器地址
+3. ✅ **登录界面支持自定义地址** - 用户可在 UI 中直接输入服务器 IP 和端口
+4. ✅ **网络配置文档** - 创建 `NETWORK_CONFIG.md` 详细说明跨机器连接配置方法
+
+### 修改文件
+| 文件 | 修改内容 |
+|------|---------|
+| `client/config.py` | 添加环境变量支持，可通过 `STONK_SERVER_HOST` 和 `STONK_SERVER_PORT` 覆盖默认值 |
+| `start_client.bat` | 添加服务器地址配置说明和环境变量显示 |
+| `start_client.ps1` | 添加服务器地址配置说明和环境变量显示 |
+
+### 新增文件
+| 文件 | 描述 |
+|------|------|
+| `NETWORK_CONFIG.md` | 跨机器网络连接配置指南，包含防火墙配置、连接测试、故障排查 |
+
+### 使用方式
+
+#### 方法一：修改启动脚本
+编辑 `start_client.bat` 或 `start_client.ps1`，取消注释并设置：
+```batch
+set STONK_SERVER_HOST=192.168.1.100
+set STONK_SERVER_PORT=8765
+```
+
+#### 方法二：命令行环境变量
+```cmd
+set STONK_SERVER_HOST=192.168.1.100
+set STONK_SERVER_PORT=8765
+start_client.bat
+```
+
+#### 方法三：登录界面输入
+直接在客户端登录界面的"地址"输入框中输入服务器 IP 地址。
+
+### 服务器配置
+- 服务器默认绑定 `0.0.0.0:8765`（所有网络接口），无需修改
+- 需确保防火墙开放 TCP 端口 8765
+
+### 防火墙配置命令（服务器端）
+```powershell
+New-NetFirewallRule -DisplayName "Stonk Server" -Direction Inbound -Protocol TCP -LocalPort 8765 -Action Allow
+```
+
+---
+
 ## 十二、Phase 4 完成总结
 
 ### 已完成的工作

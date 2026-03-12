@@ -17,22 +17,33 @@ if errorlevel 1 (
 echo [OK] Python found
 echo.
 
-:: Kill any existing StonkServer windows
-taskkill /FI "WINDOWTITLE eq StonkServer*" /F >nul 2>&1
+:: ==================== 服务器地址配置 ====================
+:: 默认连接本地服务器，如需连接远程服务器，请取消下面一行的注释并修改 IP 地址
+:: set STONK_SERVER_HOST=192.168.1.100
+:: set STONK_SERVER_PORT=8765
+
+:: 如果设置了环境变量，显示当前配置
+if defined STONK_SERVER_HOST (
+    echo [CONFIG] Server Host: %STONK_SERVER_HOST%
+) else (
+    echo [CONFIG] Server Host: 127.0.0.1 (local)
+)
+if defined STONK_SERVER_PORT (
+    echo [CONFIG] Server Port: %STONK_SERVER_PORT%
+) else (
+    echo [CONFIG] Server Port: 8765
+)
+echo.
+
+:: 如果有自定义配置，提示用户
+if defined STONK_SERVER_HOST (
+    echo [INFO] Connecting to remote server: %STONK_SERVER_HOST%:%STONK_SERVER_PORT%
+    echo [INFO] Make sure the server is accessible from your network
+    echo.
+)
 
 :: Set PYTHONPATH to current directory
 set PYTHONPATH=%CD%
-
-:: Start WebSocket server in background
-echo [STARTING] WebSocket Server...
-start "StonkServer" cmd /c "set PYTHONPATH=%CD% && python server/websocket_server.py"
-
-:: Wait for server to start
-echo [WAITING] Waiting for server to start...
-timeout /t 5 /nobreak >nul
-
-echo [OK] WebSocket Server started (ws://localhost:8765)
-echo.
 
 :: Start Client UI (foreground, logs output to console)
 echo [STARTING] Client UI...
@@ -43,7 +54,4 @@ python client/ui/main_window.py
 
 echo.
 echo [DONE] Client closed
-
-:: Kill server when UI closes
-taskkill /FI "WINDOWTITLE eq StonkServer*" /F >nul 2>&1
 pause

@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
     QTabWidget, QPushButton, QLabel, QGroupBox, QFormLayout,
     QLineEdit, QTextEdit, QComboBox, QDoubleSpinBox, QSpinBox,
     QTableWidget, QTableWidgetItem, QHeaderView, QMessageBox,
-    QSplitter, QGridLayout, QDialog
+    QSplitter, QGridLayout, QDialog, QInputDialog
 )
 from PySide6.QtCore import Qt, QTimer, Signal, QThread
 from PySide6.QtGui import QFont
@@ -37,7 +37,11 @@ import logging
 
 from shared.message_protocol import MessageType, create_message, parse_message
 from shared.utils import get_timestamp
-from server.config import HOST, PORT
+from shared.constants import SERVER_CONNECT_HOST, SERVER_PORT
+from server.config import PORT
+
+# 管理员 UI 应使用 SERVER_CONNECT_HOST (127.0.0.1) 连接服务器，而不是 HOST (0.0.0.0)
+HOST = SERVER_CONNECT_HOST
 
 # 配置日志
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -123,6 +127,7 @@ class NewsPublisher(QWidget):
     
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.available_rooms: Dict[str, str] = {}  # room_id -> room_name
         self.setup_ui()
         
     def setup_ui(self):
@@ -134,6 +139,12 @@ class NewsPublisher(QWidget):
         layout.addWidget(title_label)
         
         form_layout = QFormLayout()
+        
+        # 房间选择下拉框
+        self.room_combo = QComboBox()
+        self.room_combo.addItem("-- 请选择房间 --", "")
+        self.room_combo.setStyleSheet("QComboBox { background-color: #3c3c3c; color: #ffffff; border: 1px solid #555555; border-radius: 4px; padding: 6px; }")
+        form_layout.addRow("目标房间:", self.room_combo)
         
         self.title_edit = QLineEdit()
         self.title_edit.setPlaceholderText("输入新闻标题...")
@@ -152,7 +163,7 @@ class NewsPublisher(QWidget):
         form_layout.addRow("情绪:", self.sentiment_combo)
         
         self.scope_edit = QLineEdit()
-        self.scope_edit.setPlaceholderText("股票代码，多个用逗号分隔（留空表示全局）")
+        self.scope_edit.setPlaceholderText("股票代码，多个用逗号分隔（留空表示房间内全局）")
         self.scope_edit.setStyleSheet("QLineEdit { background-color: #3c3c3c; color: #ffffff; border: 1px solid #555555; border-radius: 4px; padding: 8px; }")
         form_layout.addRow("影响股票:", self.scope_edit)
         
@@ -164,12 +175,41 @@ class NewsPublisher(QWidget):
         layout.addWidget(self.publish_button)
         layout.addStretch()
         
+    def update_rooms(self, rooms: Dict[str, str]):
+        """更新房间列表
+        
+        Args:
+            rooms: {room_id: room_name} 字典
+        """
+        self.available_rooms = rooms
+        current_id = self.room_combo.currentData()
+        self.room_combo.clear()
+        self.room_combo.addItem("-- 请选择房间 --", "")
+        for room_id, room_name in sorted(rooms.items()):
+            self.room_combo.addItem(f"{room_name} ({room_id})", room_id)
+        # 尝试恢复之前选择的房间
+        if current_id and current_id in rooms:
+            for i in range(self.room_combo.count()):
+                if self.room_combo.itemData(i) == current_id:
+                    self.room_combo.setCurrentIndex(i)
+                    break
+        
+    def get_selected_room_id(self) -> Optional[str]:
+        """获取当前选择的房间 ID"""
+        return self.room_combo.currentData()
+        
     def on_publish_clicked(self):
+        room_id = self.get_selected_room_id()
+        if not room_id:
+            QMessageBox.warning(self, "警告", "请先选择要发布新闻的房间")
+            return
+            
         sentiment_map = {"积极": "positive", "中立": "neutral", "消极": "negative"}
         scope_text = self.scope_edit.text().strip()
         affected_stocks = [s.strip().upper() for s in scope_text.split(",")] if scope_text else None
         
         news_data = {
+            "room_id": room_id,
             "title": self.title_edit.text().strip(),
             "content": self.content_edit.toPlainText().strip(),
             "sentiment": sentiment_map[self.sentiment_combo.currentText()],
@@ -193,6 +233,7 @@ class ReportPublisher(QWidget):
     
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.available_rooms: Dict[str, str] = {}  # room_id -> room_name
         self.setup_ui()
         
     def setup_ui(self):
@@ -204,6 +245,12 @@ class ReportPublisher(QWidget):
         layout.addWidget(title_label)
         
         form_layout = QFormLayout()
+        
+        # 房间选择下拉框
+        self.room_combo = QComboBox()
+        self.room_combo.addItem("-- 请选择房间 --", "")
+        self.room_combo.setStyleSheet("QComboBox { background-color: #3c3c3c; color: #ffffff; border: 1px solid #555555; border-radius: 4px; padding: 6px; }")
+        form_layout.addRow("目标房间:", self.room_combo)
         
         self.stock_code_edit = QLineEdit()
         self.stock_code_edit.setPlaceholderText("例如：AAPL")
@@ -253,13 +300,42 @@ class ReportPublisher(QWidget):
         layout.addWidget(self.publish_button)
         layout.addStretch()
         
+    def update_rooms(self, rooms: Dict[str, str]):
+        """更新房间列表
+        
+        Args:
+            rooms: {room_id: room_name} 字典
+        """
+        self.available_rooms = rooms
+        current_id = self.room_combo.currentData()
+        self.room_combo.clear()
+        self.room_combo.addItem("-- 请选择房间 --", "")
+        for room_id, room_name in sorted(rooms.items()):
+            self.room_combo.addItem(f"{room_name} ({room_id})", room_id)
+        # 尝试恢复之前选择的房间
+        if current_id and current_id in rooms:
+            for i in range(self.room_combo.count()):
+                if self.room_combo.itemData(i) == current_id:
+                    self.room_combo.setCurrentIndex(i)
+                    break
+        
+    def get_selected_room_id(self) -> Optional[str]:
+        """获取当前选择的房间 ID"""
+        return self.room_combo.currentData()
+        
     def on_publish_clicked(self):
+        room_id = self.get_selected_room_id()
+        if not room_id:
+            QMessageBox.warning(self, "警告", "请先选择要发布财报的房间")
+            return
+            
         stock_code = self.stock_code_edit.text().strip().upper()
         if not stock_code:
             QMessageBox.warning(self, "警告", "请填写股票代码")
             return
         
         report_data = {
+            "room_id": room_id,
             "stock_code": stock_code,
             "pe_ratio": self.pe_spin.value(),
             "roe": self.roe_spin.value(),
@@ -525,7 +601,7 @@ class StockManagementWidget(QWidget):
         if dialog.exec() == 1:
             selected_stock = dialog.get_selected_stock()
             if selected_stock:
-                price, ok = QDoubleSpinBox.getDouble(self, "设定初始价格", f"为 {selected_stock['code']} 设定初始价格:", selected_stock.get("initial_price", 100.0), 0.01, 1e9, 2)
+                price, ok = QInputDialog.getDouble(self, "设定初始价格", f"为 {selected_stock['code']} 设定初始价格:", selected_stock.get("initial_price", 100.0), 0.01, 1e9, 2)
                 if ok:
                     self.add_to_room_signal.emit({"room_id": self.current_room_id, "stock_code": selected_stock["code"], "current_price": price})
                     
@@ -1002,19 +1078,19 @@ class AdminMainWindow(QMainWindow):
             self.send_message(message)
             
     def on_publish_news(self, news_data: dict):
-        if not self.current_room_id:
-            QMessageBox.warning(self, "警告", "请先选择一个房间")
+        # news_data 已经包含 room_id（从新闻发布器的房间下拉框选择）
+        if not news_data.get("room_id"):
+            QMessageBox.warning(self, "警告", "请先选择要发布新闻的房间")
             return
-        payload = {"room_id": self.current_room_id, **news_data}
-        message = create_message(MessageType.ADMIN_PUBLISH_NEWS, payload)
+        message = create_message(MessageType.ADMIN_PUBLISH_NEWS, news_data)
         self.send_message(message)
         
     def on_publish_report(self, report_data: dict):
-        if not self.current_room_id:
-            QMessageBox.warning(self, "警告", "请先选择一个房间")
+        # report_data 已经包含 room_id（从财报发布器的房间下拉框选择）
+        if not report_data.get("room_id"):
+            QMessageBox.warning(self, "警告", "请先选择要发布财报的房间")
             return
-        payload = {"room_id": self.current_room_id, **report_data}
-        message = create_message(MessageType.ADMIN_PUBLISH_REPORT, payload)
+        message = create_message(MessageType.ADMIN_PUBLISH_REPORT, report_data)
         self.send_message(message)
         
     def on_stock_intervention(self, intervene_data: dict):
@@ -1131,6 +1207,11 @@ class AdminMainWindow(QMainWindow):
             self.room_list.setItem(row, 2, QTableWidgetItem(room.get("status", "")))
             self.room_list.setItem(row, 3, QTableWidgetItem(str(room.get("user_count", 0))))
             self.room_list.setItem(row, 4, QTableWidgetItem(str(room.get("robot_count", 0))))
+        
+        # 同步更新新闻发布器和财报发布器的房间列表
+        rooms_dict = {room["id"]: room.get("name", "Unknown") for room in rooms}
+        self.news_publisher.update_rooms(rooms_dict)
+        self.report_publisher.update_rooms(rooms_dict)
 
     def on_room_selected(self):
         selected = self.room_list.selectedItems()
