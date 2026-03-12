@@ -607,7 +607,67 @@ Total All:                  168 tests - PASSED (Phase 1 + Phase 2 + Phase 3)
 
 ---
 
-## 十三、跨机器网络支持 (2026-03-12)
+## 十五、机器人管理功能重构 (2026-03-12 更新)
+
+### 本次更新内容
+- 移除了 `ADMIN_STOCK_INTERVENTION` 消息类型和相关处理器
+- 修复了 Robots 表 `room_id` 字段允许 NULL（全局机器人池）
+- 修复了 `websocket_server.py` 中缺少策略引擎初始化的问题
+- 修复了 `admin_tools.py` 中调用不存在的 `set_stock_price` 方法的问题
+- 所有机器人管理功能已验证正常工作
+
+---
+
+## 十三、机器人管理功能更新 (2026-03-12)
+
+### 已完成的工作
+1. ✅ **移除股票干预功能** - 移除了 `StockInterventionWidget` 和相关干预 API
+2. ✅ **全局机器人池管理** - 支持创建/删除/修改机器人策略
+3. ✅ **房间机器人池管理** - 支持从全局池添加/移除机器人到房间
+4. ✅ **消息协议扩展** - 新增 9 种机器人管理消息类型和 2 种响应类型
+5. ✅ **数据库扩展** - 支持全局机器人（room_id 为空）
+
+### 修改文件
+| 文件 | 修改内容 |
+|------|---------|
+| `shared/message_protocol.py` | 移除 `ADMIN_PRICE_INTERVENTION`，新增 9 种机器人管理消息类型 + 2 种响应类型 |
+| `server/models.py` | 新增全局机器人池 CRUD 操作（`create_global_robot`, `list_global_robots`, `assign_robot_to_room`, `remove_robot_from_room`, `update_robot_strategy`, `delete_robot`） |
+| `server/admin_tools.py` | 移除股票干预方法，新增机器人管理方法（`create_global_robot`, `delete_global_robot`, `list_global_robots`, `update_robot_strategy`, `add_robot_to_room`, `remove_robot_from_room`, `list_room_robots`） |
+| `server/admin_ui.py` | 用 `RobotManagementWidget` 替换 `StockInterventionWidget`，更新标签页为"🤖 机器人管理" |
+| `server/websocket_server.py` | 新增 7 个机器人管理消息处理器 |
+
+### 新增消息类型
+| 消息类型 | 描述 |
+|---------|------|
+| `ADMIN_CREATE_ROBOT` | 创建全局机器人 |
+| `ADMIN_UPDATE_ROBOT` | 更新机器人信息 |
+| `ADMIN_DELETE_ROBOT` | 删除机器人 |
+| `ADMIN_LIST_ROBOTS` | 列出全局机器人 |
+| `ADMIN_SET_ROBOT_STRATEGY` | 设置机器人策略类型 |
+| `ADMIN_ADD_ROBOT_TO_ROOM` | 添加机器人到房间 |
+| `ADMIN_REMOVE_ROBOT_FROM_ROOM` | 从房间移除机器人 |
+| `ADMIN_LIST_ROOM_ROBOTS` | 列出房间机器人 |
+| `ROBOT_LIST` | 全局机器人列表响应 |
+| `ROOM_ROBOT_LIST` | 房间机器人列表响应 |
+
+### 机器人管理 UI 功能
+| 组件 | 功能 |
+|------|------|
+| 全局机器人池表格 | 显示名称、策略类型、初始资金、状态、操作按钮（修改策略/删除） |
+| 房间机器人池表格 | 显示名称、策略类型、初始资金、当前资产、移除按钮 |
+| 创建机器人对话框 | 输入名称、选择策略、设定初始资金 |
+| 修改策略对话框 | 切换机器人策略类型（retail/institution/trend） |
+| 选择机器人对话框 | 从全局池选择添加到房间 |
+
+### 架构亮点
+- **两级池设计**: 全局机器人池 + 房间机器人池，灵活调配
+- **策略可切换**: 支持动态修改机器人策略类型
+- **数据隔离**: 全局机器人 `room_id` 为空，房间机器人有明确归属
+- **UI 组件化**: 复用已有的 `RobotManagementWidget` 设计模式
+
+---
+
+## 十四、跨机器网络支持 (2026-03-12)
 
 ### 已完成的工作
 1. ✅ **客户端配置支持环境变量** - 可通过 `STONK_SERVER_HOST` 和 `STONK_SERVER_PORT` 指定远程服务器

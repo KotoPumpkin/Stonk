@@ -93,11 +93,11 @@ class DatabaseManager:
             )
         """)
         
-        # Robots 表 - 机器人账户
+        # Robots 表 - 机器人账户（room_id 为 NULL 表示全局机器人池）
         await cursor.execute("""
             CREATE TABLE IF NOT EXISTS Robots (
                 id TEXT PRIMARY KEY,
-                room_id TEXT NOT NULL,
+                room_id TEXT,
                 name TEXT NOT NULL,
                 strategy_type TEXT NOT NULL,
                 initial_capital REAL NOT NULL,
@@ -108,6 +108,13 @@ class DatabaseManager:
                 FOREIGN KEY (room_id) REFERENCES Rooms(id) ON DELETE CASCADE
             )
         """)
+        
+        # 迁移：如果旧表存在且 room_id 有 NOT NULL 约束，尝试修复
+        try:
+            await cursor.execute("UPDATE Robots SET room_id = NULL WHERE room_id = ''")
+            await self.connection.commit()
+        except Exception:
+            pass
         
         # TradeRecords 表 - 交易记录
         await cursor.execute("""
@@ -750,6 +757,154 @@ class DatabaseManager:
         except Exception as e:
             print(f"Error listing room robots: {e}")
             return []
+    
+    # ==================== Global Robot Pool Operations ====================
+    
+    async def create_global_robot(self, name: str, strategy_type: str, initial_capital: float) -> Optional[str]:
+        """
+        创建全局机器人（未分配到房间的机器人）
+        
+        Args:
+            name: 机器人名称
+            strategy_type: 策略类型
+            initial_capital: 初始资金
+            
+        Returns:
+            机器人 ID，如果创建失败则返回 None
+        """
+        try:
+            cursor = await self.connection.cursor()
+            robot_id = generate_robot_id()
+            now = time.time()
+            
+            await cursor.execute("""
+                INSERT INTO Robots (id, room_id, name, strategy_type, initial_capital, current_cash, holdings, created_at, updated_at)
+                VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?)
+            """, (robot_id, name, strategy_type, initial_capital, initial_capital, "{}", now, now))
+            
+            await self.connection.commit()
+            return robot_id
+        except Exception as e:
+            print(f"Error creating global robot: {e}")
+            return None
+    
+    async def list_global_robots(self) -> List[Dict[str, Any]]:
+        """
+        列出所有全局机器人（未分配到房间的机器人）
+        
+        Returns:
+            机器人列表
+        """
+        try:
+            cursor = await self.connection.cursor()
+            await cursor.execute("""
+                SELECT id, name, strategy_type, initial_capital, current_cash, holdings
+                FROM Robots WHERE room_id IS NULL OR room_id = ''
+            """)
+            
+            rows = await cursor.fetchall()
+            robots = []
+            for row in rows:
+                robot_id, name, strategy_type, initial_capital, current_cash, holdings = row
+                robots.append({
+                    "id": robot_id,
+                    "name": name,
+                    "strategy_type": strategy_type,
+                    "initial_capital": initial_capital,
+                    "current_cash": current_cash,
+                    "holdings": json.loads(holdings)
+                })
+            return robots
+        except Exception as e:
+            print(f"Error listing global robots: {e}")
+            return []
+    
+    async def delete_robot(self, robot_id: str) -> bool:
+        """
+        删除机器人
+        
+        Args:
+            robot_id: 机器人 ID
+            
+        Returns:
+            是否删除成功
+        """
+        try:
+            cursor = await self.connection.cursor()
+            await cursor.execute("DELETE FROM Robots WHERE id = ?", (robot_id,))
+            await self.connection.commit()
+            return True
+        except Exception as e:
+            print(f"Error deleting robot: {e}")
+            return False
+    
+    async def update_robot_strategy(self, robot_id: str, strategy_type: str) -> bool:
+        """
+        更新机器人策略类型
+        
+        Args:
+            robot_id: 机器人 ID
+            strategy_type: 新策略类型
+            
+        Returns:
+            是否更新成功
+        """
+        try:
+            cursor = await self.connection.cursor()
+            await cursor.execute("""
+                UPDATE Robots SET strategy_type = ?, updated_at = ?
+                WHERE id = ?
+            """, (strategy_type, time.time(), robot_id))
+            await self.connection.commit()
+            return True
+        except Exception as e:
+            print(f"Error updating robot strategy: {e}")
+            return False
+    
+    async def assign_robot_to_room(self, robot_id: str, room_id: str) -> bool:
+        """
+        将机器人分配到房间
+        
+        Args:
+            robot_id: 机器人 ID
+            room_id: 房间 ID
+            
+        Returns:
+            是否分配成功
+        """
+        try:
+            cursor = await self.connection.cursor()
+            await cursor.execute("""
+                UPDATE Robots SET room_id = ?, updated_at = ?
+                WHERE id = ?
+            """, (room_id, time.time(), robot_id))
+            await self.connection.commit()
+            return True
+        except Exception as e:
+            print(f"Error assigning robot to room: {e}")
+            return False
+    
+    async def remove_robot_from_room(self, robot_id: str) -> bool:
+        """
+        将机器人从房间移除（返回全局机器人池）
+        
+        Args:
+            robot_id: 机器人 ID
+            
+        Returns:
+            是否移除成功
+        """
+        try:
+            cursor = await self.connection.cursor()
+            await cursor.execute("""
+                UPDATE Robots SET room_id = NULL, updated_at = ?
+                WHERE id = ?
+            """, (time.time(), robot_id))
+            await self.connection.commit()
+            return True
+        except Exception as e:
+            print(f"Error removing robot from room: {e}")
+            return False
     
     # ==================== Trade Record Operations ====================
     

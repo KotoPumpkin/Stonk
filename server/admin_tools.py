@@ -4,8 +4,8 @@ Stonk - 管理员工具模块
 实现管理员干预功能：
 - 新闻发布系统
 - 财报发布系统
-- 价格/参数干预
 - 房间管理（销毁、踢人）
+- 机器人管理（全局机器人池、房间机器人池）
 """
 
 import asyncio
@@ -295,116 +295,205 @@ class AdminTools:
     
     # ==================== 价格/参数干预 ====================
     
-    def intervene_stock_params(
+    # ==================== 全局机器人池管理 ====================
+    
+    async def create_global_robot(
         self,
-        room_id: str,
-        stock_code: str,
-        volatility: Optional[float] = None,
-        drift: Optional[float] = None,
-        model: Optional[str] = None
-    ) -> bool:
+        name: str,
+        strategy_type: str,
+        initial_capital: float
+    ) -> Optional[Dict]:
         """
-        干预股票价格参数
+        创建全局机器人（未分配到房间）
         
         Args:
-            room_id: 房间 ID
-            stock_code: 股票代码
-            volatility: 波动率（可选）
-            drift: 漂移率（可选）
-            model: 价格模型（可选）
+            name: 机器人名称
+            strategy_type: 策略类型 (retail/institution/trend)
+            initial_capital: 初始资金
             
         Returns:
-            是否成功
+            机器人信息字典，失败返回 None
         """
-        if room_id not in self.price_engines:
-            return False
+        robot_id = await self.db.create_global_robot(name, strategy_type, initial_capital)
         
-        price_engine = self.price_engines[room_id]
+        if not robot_id:
+            return None
         
-        if stock_code not in price_engine.stocks:
-            return False
-        
-        # 更新波动率
-        if volatility is not None:
-            price_engine.adjust_volatility(stock_code, max(0.0, volatility))
-        
-        # 更新漂移率
-        if drift is not None:
-            price_engine.adjust_drift(stock_code, drift)
-        
-        # 更新价格模型
-        if model is not None:
-            from server.price_engine import PriceModel, PriceConfig
-            try:
-                price_model = PriceModel(model)
-                config = price_engine.stocks[stock_code].config
-                new_config = PriceConfig(
-                    model=price_model,
-                    volatility=config.volatility,
-                    drift=config.drift,
-                    mean_reversion_speed=config.mean_reversion_speed,
-                    trend_strength=config.trend_strength,
-                    news_sentiment=config.news_sentiment,
-                    news_impact=config.news_impact
-                )
-                price_engine.update_config(stock_code, new_config)
-            except ValueError:
-                return False
-        
-        return True
+        return {
+            "id": robot_id,
+            "name": name,
+            "strategy_type": strategy_type,
+            "initial_capital": initial_capital,
+            "room_id": ""
+        }
     
-    def set_stock_price(
-        self,
-        room_id: str,
-        stock_code: str,
-        new_price: float
-    ) -> bool:
+    async def delete_global_robot(self, robot_id: str) -> bool:
         """
-        直接设定股票价格
-        
-        Args:
-            room_id: 房间 ID
-            stock_code: 股票代码
-            new_price: 新价格
-            
-        Returns:
-            是否成功
-        """
-        if room_id not in self.price_engines:
-            return False
-        
-        price_engine = self.price_engines[room_id]
-        
-        if stock_code not in price_engine.stocks:
-            return False
-        
-        # 直接设置价格
-        price_engine.stocks[stock_code].current_price = max(0.01, new_price)
-        price_engine.stocks[stock_code].history.append(max(0.01, new_price))
-        
-        return True
-    
-    def update_robot_params(
-        self,
-        robot_id: str,
-        params: Dict[str, Any]
-    ) -> bool:
-        """
-        更新机器人策略参数
+        删除全局机器人
         
         Args:
             robot_id: 机器人 ID
-            params: 参数字典
             
         Returns:
             是否成功
         """
-        # 查找机器人所在的房间
+        # 先检查机器人是否在全局池中
+        robot = await self.db.get_robot(robot_id)
+        if not robot or robot.get("room_id"):
+            return False
+        
+        # 从策略引擎中移除（如果在内存中）
+        for strategy_engine in self.strategy_engines.values():
+            strategy_engine.remove_robot(robot_id)
+        
+        return await self.db.delete_robot(robot_id)
+    
+    async def list_global_robots(self) -> List[Dict[str, Any]]:
+        """
+        列出所有全局机器人
+        
+        Returns:
+            机器人列表
+        """
+        return await self.db.list_global_robots()
+    
+    async def update_robot_strategy(
+        self,
+        robot_id: str,
+        strategy_type: str
+    ) -> bool:
+        """
+        更新机器人策略类型
+        
+        Args:
+            robot_id: 机器人 ID
+            strategy_type: 新策略类型
+            
+        Returns:
+            是否成功
+        """
+        # 更新数据库
+        success = await self.db.update_robot_strategy(robot_id, strategy_type)
+        if not success:
+            return False
+        
+        # 更新内存中的策略引擎
         for room_id, strategy_engine in self.strategy_engines.items():
             if robot_id in strategy_engine.robots:
-                return strategy_engine.update_robot_params(robot_id, params)
+                # 需要重新注册机器人
+                robot = await self.db.get_robot(robot_id)
+                if robot:
+                    strategy_engine.remove_robot(robot_id)
+                    from server.strategy_engine import StrategyType
+                    strategy_type_enum = StrategyType(strategy_type)
+                    strategy_engine.register_robot(
+                        robot_id,
+                        room_id,
+                        robot["name"],
+                        strategy_type_enum,
+                        robot["initial_capital"]
+                    )
+                break
         
-        return False
+        return True
+    
+    # ==================== 房间机器人池管理 ====================
+    
+    async def add_robot_to_room(
+        self,
+        robot_id: str,
+        room_id: str
+    ) -> bool:
+        """
+        将机器人从全局池添加到房间
+        
+        Args:
+            robot_id: 机器人 ID
+            room_id: 房间 ID
+            
+        Returns:
+            是否成功
+        """
+        # 检查机器人是否存在且在全局池中
+        robot = await self.db.get_robot(robot_id)
+        if not robot:
+            return False
+        if robot.get("room_id"):
+            return False  # 机器人已经在房间中
+        
+        # 检查房间是否存在
+        if room_id not in self.strategy_engines:
+            return False
+        
+        # 更新数据库
+        success = await self.db.assign_robot_to_room(robot_id, room_id)
+        if not success:
+            return False
+        
+        # 注册到策略引擎
+        from server.strategy_engine import StrategyType
+        strategy_engine = self.strategy_engines[room_id]
+        try:
+            strategy_type_enum = StrategyType(robot["strategy_type"])
+            strategy_engine.register_robot(
+                robot_id,
+                room_id,
+                robot["name"],
+                strategy_type_enum,
+                robot["initial_capital"]
+            )
+        except ValueError:
+            # 策略类型无效，使用默认
+            strategy_engine.register_robot(
+                robot_id,
+                room_id,
+                robot["name"],
+                StrategyType.RETAIL,
+                robot["initial_capital"]
+            )
+        
+        return True
+    
+    async def remove_robot_from_room(
+        self,
+        robot_id: str
+    ) -> bool:
+        """
+        将机器人从房间移除（返回全局池）
+        
+        Args:
+            robot_id: 机器人 ID
+            
+        Returns:
+            是否成功
+        """
+        # 检查机器人是否存在
+        robot = await self.db.get_robot(robot_id)
+        if not robot:
+            return False
+        
+        current_room_id = robot.get("room_id")
+        if not current_room_id:
+            return False  # 机器人已经在全局池中
+        
+        # 从策略引擎中移除
+        if current_room_id in self.strategy_engines:
+            self.strategy_engines[current_room_id].remove_robot(robot_id)
+        
+        # 更新数据库
+        return await self.db.remove_robot_from_room(robot_id)
+    
+    async def list_room_robots(self, room_id: str) -> List[Dict[str, Any]]:
+        """
+        列出房间内的所有机器人
+        
+        Args:
+            room_id: 房间 ID
+            
+        Returns:
+            机器人列表
+        """
+        return await self.db.list_room_robots(room_id)
     
     # ==================== 房间管理 ====================
     
@@ -692,11 +781,6 @@ class AdminTools:
         if room_id in self.price_engines:
             price_engine = self.price_engines[room_id]
             price_engine.add_stock(stock_code, stock["name"], current_price)
-        
-        # 同步到交易管理器
-        if room_id in self.trade_managers:
-            trade_manager = self.trade_managers[room_id]
-            trade_manager.set_stock_price(stock_code, current_price)
         
         return True
     

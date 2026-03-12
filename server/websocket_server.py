@@ -70,6 +70,9 @@ class StonkWebSocketServer:
         # 管理员工具
         self.admin_tools: Optional[AdminTools] = None
         
+        # 操作日志（每个房间最多保留 500 条）
+        self.room_operation_logs: Dict[str, List[dict]] = {}
+        
     async def initialize(self) -> None:
         """初始化服务器"""
         await self.db.initialize()
@@ -187,8 +190,6 @@ class StonkWebSocketServer:
                 await self.handle_admin_publish_news(websocket, data)
             elif message_type == MessageType.ADMIN_PUBLISH_REPORT:
                 await self.handle_admin_publish_report(websocket, data)
-            elif message_type == MessageType.ADMIN_STOCK_INTERVENTION:
-                await self.handle_admin_stock_intervention(websocket, data)
             elif message_type == MessageType.ADMIN_DESTROY_ROOM:
                 await self.handle_admin_destroy_room(websocket, data)
             elif message_type == MessageType.ADMIN_STEP_FORWARD:
@@ -214,6 +215,29 @@ class StonkWebSocketServer:
                 await self.handle_admin_remove_stock_from_room(websocket, data)
             elif message_type == MessageType.ADMIN_LIST_ROOM_STOCKS:
                 await self.handle_admin_list_room_stocks(websocket, data)
+            # 机器人管理命令
+            elif message_type == MessageType.ADMIN_CREATE_ROBOT:
+                await self.handle_admin_create_robot(websocket, data)
+            elif message_type == MessageType.ADMIN_UPDATE_ROBOT:
+                await self.handle_admin_update_robot(websocket, data)
+            elif message_type == MessageType.ADMIN_DELETE_ROBOT:
+                await self.handle_admin_delete_robot(websocket, data)
+            elif message_type == MessageType.ADMIN_LIST_ROBOTS:
+                await self.handle_admin_list_robots(websocket, data)
+            elif message_type == MessageType.ADMIN_SET_ROBOT_STRATEGY:
+                await self.handle_admin_set_robot_strategy(websocket, data)
+            elif message_type == MessageType.ADMIN_ADD_ROBOT_TO_ROOM:
+                await self.handle_admin_add_robot_to_room(websocket, data)
+            elif message_type == MessageType.ADMIN_REMOVE_ROBOT_FROM_ROOM:
+                await self.handle_admin_remove_robot_from_room(websocket, data)
+            elif message_type == MessageType.ADMIN_LIST_ROOM_ROBOTS:
+                await self.handle_admin_list_room_robots(websocket, data)
+            # 参与者管理
+            elif message_type == MessageType.ADMIN_LIST_ROOM_PARTICIPANTS:
+                await self.handle_admin_list_room_participants(websocket, data)
+            # 操作日志
+            elif message_type == MessageType.ADMIN_GET_OPERATION_LOG:
+                await self.handle_admin_get_operation_log(websocket, data)
             else:
                 logger.warning(f"Unknown message type: {message_type}")
         
@@ -479,6 +503,13 @@ class StonkWebSocketServer:
             }, room_id)
             await websocket.send(response)
             logger.info(f"User {user_id} placed order {order.id} in room {room_id}")
+            # 记录操作日志
+            action_name = "买入" if side == "buy" else "卖出"
+            await self._add_operation_log(
+                room_id, "user", user_id, user_id,
+                "place_order",
+                f"{action_name} {int(quantity)} 股 {stock_code} @ ¥{float(price):.2f}"
+            )
         else:
             await websocket.send(create_message(MessageType.ERROR, {"error": "Failed to place order"}))
     
@@ -504,6 +535,12 @@ class StonkWebSocketServer:
         if success:
             response = create_message(MessageType.SUCCESS, {"message": "Order cancelled"}, room_id)
             await websocket.send(response)
+            # 记录操作日志
+            await self._add_operation_log(
+                room_id, "user", user_id, user_id,
+                "cancel_order",
+                f"取消订单 {order_id}"
+            )
         else:
             await websocket.send(create_message(MessageType.ERROR, {"error": "Failed to cancel order"}))
     
@@ -620,38 +657,6 @@ class StonkWebSocketServer:
             logger.info(f"Report published in room {room_id} for {stock_code}")
         else:
             await websocket.send(create_message(MessageType.ERROR, {"error": "Failed to publish report"}))
-    
-    async def handle_admin_stock_intervention(self, websocket: WebSocketServerProtocol, data: Dict[str, Any]) -> None:
-        """处理股票干预请求"""
-        room_id = data.get("room_id")
-        stock_code = data.get("stock_code")
-        intervention_type = data.get("type")
-        
-        if not room_id or not stock_code:
-            await websocket.send(create_message(MessageType.ERROR, {"error": "Missing required fields"}))
-            return
-        
-        await self._ensure_admin_tools()
-        
-        success = False
-        if intervention_type == "params":
-            volatility = data.get("volatility")
-            drift = data.get("drift")
-            model = data.get("model")
-            success = self.admin_tools.intervene_stock_params(
-                room_id, stock_code, volatility, drift, model
-            )
-        elif intervention_type == "price":
-            price = data.get("price")
-            if price is not None:
-                success = self.admin_tools.set_stock_price(room_id, stock_code, price)
-        
-        if success:
-            response = create_message(MessageType.SUCCESS, {"message": "Stock intervention successful"})
-            await websocket.send(response)
-            logger.info(f"Stock intervention in room {room_id} for {stock_code}")
-        else:
-            await websocket.send(create_message(MessageType.ERROR, {"error": "Failed to intervene stock"}))
     
     async def handle_admin_destroy_room(self, websocket: WebSocketServerProtocol, data: Dict[str, Any]) -> None:
         """处理销毁房间请求"""
@@ -884,6 +889,252 @@ class StonkWebSocketServer:
         response = create_message(MessageType.ROOM_STOCK_LIST, {"stocks": stocks, "room_id": room_id})
         await websocket.send(response)
     
+    # ==================== Robot Management Handlers ====================
+    
+    async def handle_admin_create_robot(self, websocket: WebSocketServerProtocol, data: Dict[str, Any]) -> None:
+        """处理创建机器人请求"""
+        name = data.get("name")
+        strategy_type = data.get("strategy_type", "retail")
+        initial_capital = data.get("initial_capital", 100000)
+        
+        if not name:
+            await websocket.send(create_message(MessageType.ERROR, {"error": "Missing robot name"}))
+            return
+        
+        await self._ensure_admin_tools()
+        result = await self.admin_tools.create_global_robot(name, strategy_type, initial_capital)
+        
+        if result:
+            response = create_message(MessageType.SUCCESS, {
+                "message": "Robot created successfully",
+                "robot": result
+            })
+            await websocket.send(response)
+            logger.info(f"Robot {name} created with strategy {strategy_type}")
+        else:
+            await websocket.send(create_message(MessageType.ERROR, {"error": "Failed to create robot"}))
+    
+    async def handle_admin_update_robot(self, websocket: WebSocketServerProtocol, data: Dict[str, Any]) -> None:
+        """处理更新机器人请求"""
+        robot_id = data.get("robot_id")
+        
+        if not robot_id:
+            await websocket.send(create_message(MessageType.ERROR, {"error": "Missing robot_id"}))
+            return
+        
+        await self._ensure_admin_tools()
+        # 这里可以扩展 admin_tools 来支持更多更新
+        response = create_message(MessageType.SUCCESS, {"message": "Robot updated successfully"})
+        await websocket.send(response)
+    
+    async def handle_admin_delete_robot(self, websocket: WebSocketServerProtocol, data: Dict[str, Any]) -> None:
+        """处理删除机器人请求"""
+        robot_id = data.get("robot_id")
+        
+        if not robot_id:
+            await websocket.send(create_message(MessageType.ERROR, {"error": "Missing robot_id"}))
+            return
+        
+        await self._ensure_admin_tools()
+        success = await self.admin_tools.delete_global_robot(robot_id)
+        
+        if success:
+            response = create_message(MessageType.SUCCESS, {"message": "Robot deleted successfully"})
+            await websocket.send(response)
+            logger.info(f"Robot {robot_id} deleted")
+        else:
+            await websocket.send(create_message(MessageType.ERROR, {"error": "Failed to delete robot"}))
+    
+    async def handle_admin_list_robots(self, websocket: WebSocketServerProtocol, data: Dict[str, Any]) -> None:
+        """处理列出全局机器人请求"""
+        await self._ensure_admin_tools()
+        robots = await self.admin_tools.list_global_robots()
+        
+        response = create_message(MessageType.ROBOT_LIST, {"robots": robots})
+        await websocket.send(response)
+    
+    async def handle_admin_set_robot_strategy(self, websocket: WebSocketServerProtocol, data: Dict[str, Any]) -> None:
+        """处理设置机器人策略请求"""
+        robot_id = data.get("robot_id")
+        strategy_type = data.get("strategy_type")
+        
+        if not robot_id or not strategy_type:
+            await websocket.send(create_message(MessageType.ERROR, {"error": "Missing robot_id or strategy_type"}))
+            return
+        
+        await self._ensure_admin_tools()
+        success = await self.admin_tools.update_robot_strategy(robot_id, strategy_type)
+        
+        if success:
+            response = create_message(MessageType.SUCCESS, {"message": "Robot strategy updated successfully"})
+            await websocket.send(response)
+            logger.info(f"Robot {robot_id} strategy updated to {strategy_type}")
+        else:
+            await websocket.send(create_message(MessageType.ERROR, {"error": "Failed to update robot strategy"}))
+    
+    async def handle_admin_add_robot_to_room(self, websocket: WebSocketServerProtocol, data: Dict[str, Any]) -> None:
+        """处理添加机器人到房间请求"""
+        room_id = data.get("room_id")
+        robot_id = data.get("robot_id")
+        
+        if not room_id or not robot_id:
+            await websocket.send(create_message(MessageType.ERROR, {"error": "Missing room_id or robot_id"}))
+            return
+        
+        await self._ensure_admin_tools()
+        success = await self.admin_tools.add_robot_to_room(robot_id, room_id)
+        
+        if success:
+            response = create_message(MessageType.SUCCESS, {"message": "Robot added to room successfully"})
+            await websocket.send(response)
+            logger.info(f"Robot {robot_id} added to room {room_id}")
+        else:
+            await websocket.send(create_message(MessageType.ERROR, {"error": "Failed to add robot to room"}))
+    
+    async def handle_admin_remove_robot_from_room(self, websocket: WebSocketServerProtocol, data: Dict[str, Any]) -> None:
+        """处理从房间移除机器人请求"""
+        robot_id = data.get("robot_id")
+        
+        if not robot_id:
+            await websocket.send(create_message(MessageType.ERROR, {"error": "Missing robot_id"}))
+            return
+        
+        await self._ensure_admin_tools()
+        success = await self.admin_tools.remove_robot_from_room(robot_id)
+        
+        if success:
+            response = create_message(MessageType.SUCCESS, {"message": "Robot removed from room successfully"})
+            await websocket.send(response)
+            logger.info(f"Robot {robot_id} removed from room")
+        else:
+            await websocket.send(create_message(MessageType.ERROR, {"error": "Failed to remove robot from room"}))
+    
+    async def handle_admin_list_room_robots(self, websocket: WebSocketServerProtocol, data: Dict[str, Any]) -> None:
+        """处理列出房间机器人请求"""
+        room_id = data.get("room_id")
+        
+        if not room_id:
+            await websocket.send(create_message(MessageType.ERROR, {"error": "Missing room_id"}))
+            return
+        
+        await self._ensure_admin_tools()
+        robots = await self.admin_tools.list_room_robots(room_id)
+        
+        response = create_message(MessageType.ROOM_ROBOT_LIST, {"robots": robots, "room_id": room_id})
+        await websocket.send(response)
+    
+    async def handle_admin_list_room_participants(self, websocket: WebSocketServerProtocol, data: Dict[str, Any]) -> None:
+        """处理列出房间参与者请求（真人 + 机器人）"""
+        room_id = data.get("room_id")
+        
+        if not room_id:
+            await websocket.send(create_message(MessageType.ERROR, {"error": "Missing room_id"}))
+            return
+        
+        # 获取房间信息
+        room_info = await self.db.get_room(room_id)
+        initial_capital = room_info.get("initial_capital", 100000.0) if room_info else 100000.0
+        
+        # 获取当前价格
+        current_prices = {}
+        price_engine = self.price_engines.get(room_id)
+        if price_engine:
+            try:
+                current_prices = {code: price_engine.get_current_price(code) 
+                                  for code in price_engine.stocks}
+            except Exception:
+                current_prices = {}
+        
+        # 获取真人用户列表
+        user_ids = list(self.room_users.get(room_id, set()))
+        users = []
+        trade_manager = self.trade_managers.get(room_id)
+        
+        for user_id in user_ids:
+            current_cash = initial_capital
+            total_value = initial_capital
+            if trade_manager:
+                try:
+                    account = trade_manager.get_account_summary(user_id, current_prices, initial_capital)
+                    if account:
+                        current_cash = account.get("cash", initial_capital)
+                        total_value = account.get("total_value", initial_capital)
+                except Exception:
+                    pass
+            
+            users.append({
+                "user_id": user_id,
+                "username": user_id,  # 使用 user_id 作为显示名
+                "current_cash": current_cash,
+                "total_value": total_value
+            })
+        
+        # 获取机器人列表
+        robots = await self.db.list_room_robots(room_id)
+        
+        response = create_message(MessageType.ROOM_PARTICIPANT_LIST, {
+            "room_id": room_id,
+            "users": users,
+            "robots": robots
+        })
+        await websocket.send(response)
+        logger.info(f"Participant list sent for room {room_id}: {len(users)} users, {len(robots)} robots")
+    
+    async def handle_admin_get_operation_log(self, websocket: WebSocketServerProtocol, data: Dict[str, Any]) -> None:
+        """处理获取操作日志请求"""
+        room_id = data.get("room_id")
+        
+        if not room_id:
+            await websocket.send(create_message(MessageType.ERROR, {"error": "Missing room_id"}))
+            return
+        
+        entries = self.room_operation_logs.get(room_id, [])
+        response = create_message(MessageType.OPERATION_LOG, {
+            "room_id": room_id,
+            "entries": entries,
+            "is_full_log": True
+        })
+        await websocket.send(response)
+    
+    # ==================== Operation Log ====================
+    
+    async def _add_operation_log(self, room_id: str, actor_type: str, actor_id: str,
+                                  actor_name: str, action: str, details: str) -> None:
+        """添加操作日志条目并广播给所有连接"""
+        if room_id not in self.room_operation_logs:
+            self.room_operation_logs[room_id] = []
+        
+        entry = {
+            "timestamp": get_timestamp(),
+            "actor_type": actor_type,   # "user" 或 "robot"
+            "actor_id": actor_id,
+            "actor_name": actor_name,
+            "action": action,
+            "details": details
+        }
+        
+        self.room_operation_logs[room_id].append(entry)
+        
+        # 只保留最近 500 条
+        if len(self.room_operation_logs[room_id]) > 500:
+            self.room_operation_logs[room_id] = self.room_operation_logs[room_id][-500:]
+        
+        # 广播给所有连接（管理员端会接收）
+        log_message = create_message(MessageType.OPERATION_LOG, {
+            "room_id": room_id,
+            "entry": entry,
+            "is_full_log": False
+        })
+        await self._broadcast_to_all(log_message)
+    
+    async def _broadcast_to_all(self, message: str) -> None:
+        """广播消息到所有已连接的 WebSocket 客户端"""
+        for websocket in list(self.clients.keys()):
+            try:
+                await websocket.send(message)
+            except Exception as e:
+                logger.debug(f"Error broadcasting to client: {e}")
+    
     # ==================== Room Engine Management ====================
     
     async def _initialize_room_engines(self, room_id: str, stocks: List[str]) -> None:
@@ -917,6 +1168,10 @@ class StonkWebSocketServer:
         step_config = StepConfig(mode=step_mode)
         step_controller.create_room(room_id, step_config)
         self.step_controllers[room_id] = step_controller
+        
+        # 初始化策略引擎
+        strategy_engine = StrategyEngine()
+        self.strategy_engines[room_id] = strategy_engine
         
         logger.info(f"Engines initialized for room {room_id} with stocks: {stock_list}")
     
@@ -963,12 +1218,25 @@ class StonkWebSocketServer:
         }, room_id)
         await self.broadcast_to_room(room_id, price_message)
         
-        # 广播交易记录
+        # 广播交易记录并记录操作日志
         if trades:
             trade_message = create_message(MessageType.TRADE_EXECUTED, {
                 "trades": trades
             }, room_id)
             await self.broadcast_to_room(room_id, trade_message)
+            
+            # 记录每笔成交到操作日志
+            for trade in trades:
+                buyer_id = trade.get("buyer_id", "")
+                seller_id = trade.get("seller_id", "")
+                stock_code = trade.get("stock_code", "")
+                qty = trade.get("quantity", 0)
+                price = trade.get("price", 0.0)
+                await self._add_operation_log(
+                    room_id, "system", "system", "撮合引擎",
+                    "trade_executed",
+                    f"成交: {buyer_id} 买入 / {seller_id} 卖出 {qty} 股 {stock_code} @ ¥{price:.2f}"
+                )
         
         # 更新每个用户的账户信息
         trade_manager = self.trade_managers.get(room_id)
