@@ -32,11 +32,18 @@ class AsyncSignalBridge(QObject):
     register_success = Signal()
     register_failure = Signal(str)
     rooms_loaded = Signal(list)
-    room_joined = Signal(dict)   # 携带 {room_id, name, step_mode}
+    room_joined = Signal(dict)   # 携带 {room_id, name, step_mode, stocks, account}
     room_join_failed = Signal(str)
     room_created = Signal()
     room_create_failed = Signal(str)
     news_received = Signal(str, str, float)  # title, content, timestamp
+    # 交易窗口实时更新信号
+    price_updated = Signal(dict)          # {code: price}
+    account_updated = Signal(dict)        # account data dict
+    orders_updated = Signal(list)         # active orders list
+    decision_started = Signal()
+    fast_forward_started = Signal()
+    fast_forward_stopped = Signal()
 
 
 class StonkMainWindow(QMainWindow):
@@ -68,7 +75,7 @@ class StonkMainWindow(QMainWindow):
         
         # 连接信号
         self._connect_signals()
-        
+
         # 启动异步事件循环线程
         self._start_async_loop()
     
@@ -109,6 +116,12 @@ class StonkMainWindow(QMainWindow):
         self.bridge.room_created.connect(self._handle_room_created)
         self.bridge.room_create_failed.connect(self._handle_room_create_failed)
         self.bridge.news_received.connect(self._handle_news_received)
+        self.bridge.price_updated.connect(self._handle_price_updated)
+        self.bridge.account_updated.connect(self._handle_account_updated)
+        self.bridge.orders_updated.connect(self._handle_orders_updated)
+        self.bridge.decision_started.connect(self._handle_decision_started)
+        self.bridge.fast_forward_started.connect(self._handle_fast_forward_started)
+        self.bridge.fast_forward_stopped.connect(self._handle_fast_forward_stopped)
     
     # ==================== 连接处理 ====================
     
@@ -275,40 +288,186 @@ class StonkMainWindow(QMainWindow):
         room_id = room_info.get("room_id", "")
         room_name = room_info.get("name", room_id)
         step_mode = room_info.get("step_mode", "day")
+        stocks = room_info.get("stocks", [])
+        account = room_info.get("account", {})
 
         self.trading_window = TradingWindow(self.client, room_id)
         self.stacked.addWidget(self.trading_window)
         self.stacked.setCurrentWidget(self.trading_window)
 
-        # 立即更新左上角房间信息
+        # 更新房间信息
         self.trading_window.update_room_info(room_name, step_mode, 0)
+
+        # ── 加载初始股票列表、价格和历史 ──
+        if stocks:
+            stock_codes = [s["code"] for s in stocks]
+            self.trading_window.update_stocks(stock_codes)
+
+            prices = {s["code"]: s.get("current_price", 0.0) for s in stocks}
+            self.trading_window.update_current_prices(prices)
+
+            for stock in stocks:
+                code = stock["code"]
+                history = stock.get("history", [])
+                if history:
+                    # 以索引作为 x 轴时间戳
+                    price_tuples = [(float(i), float(p)) for i, p in enumerate(history)]
+                    self.trading_window.update_price_data(code, price_tuples)
+
+        # ── 加载初始账户状态 ──
+        if account:
+            self.trading_window.update_account(account)
 
         # 连接交易窗口信号
         self.trading_window.exit_room_requested.connect(self._on_exit_room)
+        self.trading_window.place_order_signal.connect(self._on_place_order)
+        self.trading_window.cancel_order_signal.connect(self._on_cancel_order)
+        self.trading_window.modify_order_signal.connect(self._on_modify_order)
+        self.trading_window.ready_signal.connect(self._on_ready)
 
-        # 注册消息处理器
+        # 注册消息处理器（在窗口和信号都就绪后注册，避免竞态）
         self._register_trading_message_handlers()
 
     def _register_trading_message_handlers(self):
-        """注册交易窗口的消息处理器"""
-        # 使用 MessageType 枚举注册新闻广播处理器（修复：原来传字符串导致 AttributeError）
+        """注册交易窗口所需的全部消息处理器"""
         self.client.register_message_handler(
-            MessageType.NEWS_BROADCAST,
-            self._on_news_broadcast
+            MessageType.NEWS_BROADCAST, self._on_news_broadcast
+        )
+        self.client.register_message_handler(
+            MessageType.PRICE_UPDATE, self._on_price_update
+        )
+        self.client.register_message_handler(
+            MessageType.ACCOUNT_UPDATE, self._on_account_update
+        )
+        self.client.register_message_handler(
+            MessageType.DECISION_START, self._on_decision_start
+        )
+        self.client.register_message_handler(
+            MessageType.FAST_FORWARD_START, self._on_fast_forward_start
+        )
+        self.client.register_message_handler(
+            MessageType.FAST_FORWARD_STOP, self._on_fast_forward_stop
+        )
+        self.client.register_message_handler(
+            MessageType.ORDER_UPDATE, self._on_order_update
         )
 
+    # ── 异步线程中的消息回调（通过 bridge 信号转发到 UI 线程）──
+
     def _on_news_broadcast(self, data: dict):
-        """处理新闻广播消息（在异步线程中调用，通过信号转发到 UI 线程）"""
         title = data.get("title", "")
         content = data.get("content", "")
         timestamp = data.get("published_at", 0)
-        # 通过 Qt 信号跨线程安全地更新 UI
         self.bridge.news_received.emit(title, content, float(timestamp))
 
+    def _on_price_update(self, data: dict):
+        prices = data.get("prices", {})
+        if prices:
+            self.bridge.price_updated.emit(prices)
+
+    def _on_account_update(self, data: dict):
+        self.bridge.account_updated.emit(data)
+
+    def _on_decision_start(self, data: dict):
+        self.bridge.decision_started.emit()
+
+    def _on_fast_forward_start(self, data: dict):
+        self.bridge.fast_forward_started.emit()
+
+    def _on_fast_forward_stop(self, data: dict):
+        self.bridge.fast_forward_stopped.emit()
+
+    def _on_order_update(self, data: dict):
+        orders = data.get("orders", [])
+        self.bridge.orders_updated.emit(orders)
+
+    # ── UI 线程中的信号处理器 ──
+
     def _handle_news_received(self, title: str, content: str, timestamp: float):
-        """在 UI 主线程中将新闻追加到交易窗口"""
         if self.trading_window:
             self.trading_window.add_news(title, content, timestamp)
+
+    def _handle_price_updated(self, prices: dict):
+        """收到步进价格更新：刷新当前价格并追加到历史"""
+        if not self.trading_window:
+            return
+        self.trading_window.update_current_prices(prices)
+        for code, price in prices.items():
+            existing = self.trading_window.price_history.get(code, [])
+            next_idx = float(len(existing))
+            self.trading_window.append_price(code, next_idx, float(price))
+
+    def _handle_account_updated(self, data: dict):
+        if self.trading_window:
+            self.trading_window.update_account(data)
+
+    def _handle_orders_updated(self, orders: list):
+        if self.trading_window:
+            self.trading_window.update_orders(orders)
+
+    def _handle_decision_started(self):
+        if self.trading_window:
+            self.trading_window.set_decision_mode(True)
+
+    def _handle_fast_forward_started(self):
+        if self.trading_window:
+            self.trading_window.set_fast_forward_mode(True)
+
+    def _handle_fast_forward_stopped(self):
+        if self.trading_window:
+            self.trading_window.set_fast_forward_mode(False)
+
+    # ── 交易操作（从 UI 线程发起，在异步线程执行）──
+
+    def _on_place_order(self, stock_code: str, side: str, quantity: int, price: float):
+        """处理下单请求"""
+        async def async_place():
+            try:
+                order_id = await self.client.place_order(stock_code, side, quantity, price)
+                if order_id:
+                    logger.info(f"Order placed: {order_id}")
+                else:
+                    logger.warning("Place order returned no order_id")
+            except Exception as e:
+                logger.error(f"Place order error: {e}")
+
+        if self.client_loop:
+            asyncio.run_coroutine_threadsafe(async_place(), self.client_loop)
+
+    def _on_cancel_order(self, order_id: str):
+        """处理取消订单请求"""
+        async def async_cancel():
+            try:
+                await self.client.cancel_order(order_id)
+            except Exception as e:
+                logger.error(f"Cancel order error: {e}")
+
+        if self.client_loop:
+            asyncio.run_coroutine_threadsafe(async_cancel(), self.client_loop)
+
+    def _on_modify_order(self, order_id: str, new_quantity: int, new_price: float):
+        """处理修改订单请求"""
+        async def async_modify():
+            try:
+                success = await self.client.modify_order(order_id, new_quantity, new_price)
+                if not success:
+                    logger.warning(f"Modify order {order_id} failed")
+            except Exception as e:
+                logger.error(f"Modify order error: {e}")
+
+        if self.client_loop:
+            asyncio.run_coroutine_threadsafe(async_modify(), self.client_loop)
+
+    def _on_ready(self):
+        """处理用户就绪信号"""
+        async def async_ready():
+            try:
+                await self.client.mark_ready()
+            except Exception as e:
+                logger.error(f"Mark ready error: {e}")
+
+        if self.client_loop:
+            asyncio.run_coroutine_threadsafe(async_ready(), self.client_loop)
     
     def _handle_room_join_failed(self, error_message: str):
         """处理加入房间失败（UI 线程）"""

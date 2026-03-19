@@ -11,6 +11,7 @@ PySide6 管理员界面，支持：
 - 财报发布器
 - 机器人管理
 - 股票管理（CRUD）
+- 调试控制台（完整显示所有 WebSocket 通信、系统日志和错误信息）
 """
 
 import sys
@@ -21,7 +22,9 @@ if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 import asyncio
+import collections
 import json
+import traceback
 import websockets
 from datetime import datetime
 from typing import Dict, List, Optional, Any
@@ -32,8 +35,8 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QMessageBox,
     QSplitter, QGridLayout, QDialog, QInputDialog, QCheckBox
 )
-from PySide6.QtCore import Qt, QTimer, Signal, QThread
-from PySide6.QtGui import QFont, QTextCursor
+from PySide6.QtCore import Qt, QTimer, Signal, QThread, QObject
+from PySide6.QtGui import QFont, QTextCursor, QColor
 
 import logging
 
@@ -46,6 +49,32 @@ HOST = SERVER_CONNECT_HOST
 
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+# ==================== 自定义日志处理器 ====================
+
+class QtLogHandler(logging.Handler, QObject):
+    """将 Python logging 输出重定向到 Qt 信号（线程安全版本）
+
+    继承 QObject 以支持 Qt 信号机制，确保跨线程日志消息
+    通过 QueuedConnection 安全投递到主线程，避免在工作线程
+    中直接操作 Qt 控件导致的 UI 无响应/崩溃问题。
+    """
+
+    _log_signal = Signal(str, int)
+
+    def __init__(self, callback):
+        logging.Handler.__init__(self)
+        QObject.__init__(self)
+        # QueuedConnection 确保信号跨线程时排队到主线程事件循环
+        self._log_signal.connect(callback, Qt.QueuedConnection)
+
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            self._log_signal.emit(msg, record.levelno)
+        except Exception:
+            pass
+
 
 # ==================== 通用样式常量 ====================
 BTN_STYLE_GREEN = "QPushButton { background-color: #2d7d2d; color: #ffffff; border: none; border-radius: 4px; padding: 8px 16px; font-weight: bold; } QPushButton:hover { background-color: #3d8d3d; } QPushButton:disabled { background-color: #555555; color: #888888; }"
@@ -71,7 +100,7 @@ class WebSocketClientThread(QThread):
         self.port = port
         self.websocket = None
         self.running = True
-        self._message_queue = []
+        self._message_queue = collections.deque()
 
     def run(self):
         loop = asyncio.new_event_loop()
@@ -96,16 +125,22 @@ class WebSocketClientThread(QThread):
                         break
                 send_task.cancel()
         except Exception as e:
-            self.error_signal.emit(f"连接失败：{str(e)}")
+            error_msg = f"连接失败：{str(e)}\n{traceback.format_exc()}"
+            logger.error(error_msg)
+            print(error_msg, flush=True)
+            self.error_signal.emit(error_msg)
 
     async def _process_send_queue(self, loop):
         while self.running:
             if self._message_queue:
-                msg_str = self._message_queue.pop(0)
+                msg_str = self._message_queue.popleft()
                 try:
                     await self.websocket.send(msg_str)
                 except Exception as e:
-                    self.error_signal.emit(f"发送失败：{str(e)}")
+                    error_msg = f"发送失败：{str(e)}\n{traceback.format_exc()}"
+                    logger.error(error_msg)
+                    print(error_msg, flush=True)
+                    self.error_signal.emit(error_msg)
             await asyncio.sleep(0.01)
 
     def send_message(self, message):
@@ -238,13 +273,14 @@ class RoomControlWidget(QWidget):
         participant_layout.addLayout(p_toolbar)
 
         self.participant_table = QTableWidget()
-        self.participant_table.setColumnCount(4)
-        self.participant_table.setHorizontalHeaderLabels(["类型", "ID / 名称", "资金", "操作"])
+        self.participant_table.setColumnCount(5)
+        self.participant_table.setHorizontalHeaderLabels(["类型", "ID / 名称", "资金", "就绪", "操作"])
         ph = self.participant_table.horizontalHeader()
         ph.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         ph.setSectionResizeMode(1, QHeaderView.Stretch)
         ph.setSectionResizeMode(2, QHeaderView.ResizeToContents)
         ph.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        ph.setSectionResizeMode(4, QHeaderView.ResizeToContents)
         self.participant_table.setStyleSheet(TABLE_STYLE)
         self.participant_table.setMinimumHeight(120)
         participant_layout.addWidget(self.participant_table)
@@ -291,7 +327,7 @@ class RoomControlWidget(QWidget):
         log_layout.addWidget(self.operation_log)
         bottom_splitter.addWidget(log_group)
 
-        bottom_splitter.setSizes([200, 250])
+        bottom_splitter.setSizes([180, 300])
         layout.addWidget(bottom_splitter, 1)
 
     # ── 房间设置 / 清除 ──
@@ -342,6 +378,10 @@ class RoomControlWidget(QWidget):
             self.participant_table.setItem(row, 0, type_item)
             self.participant_table.setItem(row, 1, QTableWidgetItem(username))
             self.participant_table.setItem(row, 2, QTableWidgetItem(f"¥{total_value:,.2f}"))
+            # 就绪状态列（默认未就绪）
+            ready_item = QTableWidgetItem("⬜ 等待中")
+            ready_item.setForeground(QColor("#888888"))
+            self.participant_table.setItem(row, 3, ready_item)
 
             kick_btn = QPushButton("踢出")
             kick_btn.setStyleSheet(
@@ -350,7 +390,7 @@ class RoomControlWidget(QWidget):
                 "QPushButton:hover { background-color: #9d3d3d; }"
             )
             kick_btn.clicked.connect(lambda checked, uid=user_id: self.kick_user_signal.emit(uid))
-            self.participant_table.setCellWidget(row, 3, kick_btn)
+            self.participant_table.setCellWidget(row, 4, kick_btn)
             row += 1
 
         # 机器人
@@ -364,7 +404,46 @@ class RoomControlWidget(QWidget):
             self.participant_table.setItem(row, 1, QTableWidgetItem(robot.get("name", "")))
             self.participant_table.setItem(row, 2, QTableWidgetItem(f"¥{total_value:,.2f}"))
             self.participant_table.setItem(row, 3, QTableWidgetItem("--"))
+            self.participant_table.setItem(row, 4, QTableWidgetItem("--"))
             row += 1
+
+    def update_ready_status(self, users_ready_info: list, ready_count: int, total_count: int):
+        """更新参与者就绪状态列（根据 STEP_READY_UPDATE 消息）"""
+        # 构建 user_id -> is_ready 映射
+        ready_map = {u.get("user_id", ""): u.get("is_ready", False) for u in users_ready_info}
+
+        # 遍历表格中的真人用户行，更新就绪状态
+        for row in range(self.participant_table.rowCount()):
+            type_item = self.participant_table.item(row, 0)
+            if not type_item or "真人" not in type_item.text():
+                continue
+            name_item = self.participant_table.item(row, 1)
+            if not name_item:
+                continue
+            # 通过用户名匹配（也可通过 user_id，但表格只存了 username）
+            # 遍历 users_ready_info 找到匹配的用户
+            username = name_item.text()
+            is_ready = False
+            for u in users_ready_info:
+                if u.get("username") == username or u.get("user_id") == username:
+                    is_ready = u.get("is_ready", False)
+                    break
+
+            if is_ready:
+                ready_item = QTableWidgetItem("✅ 已确认")
+                ready_item.setForeground(QColor("#00cc44"))
+            else:
+                ready_item = QTableWidgetItem("⬜ 等待中")
+                ready_item.setForeground(QColor("#888888"))
+            self.participant_table.setItem(row, 3, ready_item)
+
+        # 更新计数标签
+        total_users = sum(1 for row in range(self.participant_table.rowCount())
+                          if self.participant_table.item(row, 0) and "真人" in self.participant_table.item(row, 0).text())
+        self.participant_count_label.setText(
+            f"共 {self.participant_table.rowCount()} 人  "
+            f"（真人 {total_users} · 已确认 {ready_count}/{total_count}）"
+        )
 
     def on_refresh_participants(self):
         if self.current_room_id:
@@ -1247,6 +1326,239 @@ class SelectStockDialog(QDialog):
         return self.stocks[row] if row < len(self.stocks) else None
 
 
+# ==================== 调试控制台组件 ====================
+
+class DebugConsoleWidget(QWidget):
+    """调试控制台 - 显示所有 WebSocket 通信、系统日志和错误信息"""
+
+    # 最大行数限制，防止内存溢出
+    MAX_LINES = 5000
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._auto_scroll = True
+        self._show_sent = True
+        self._show_received = True
+        self._show_system = True
+        self._show_error = True
+        self._line_count = 0
+        self.setup_ui()
+
+    def setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+
+        # ── 标题 ──
+        title_label = QLabel("🔧 调试控制台")
+        title_label.setFont(QFont("Microsoft YaHei", 14, QFont.Bold))
+        title_label.setStyleSheet("color: #ffffff; padding: 4px 0;")
+        layout.addWidget(title_label)
+
+        # ── 工具栏 ──
+        toolbar = QHBoxLayout()
+        toolbar.setSpacing(8)
+
+        self.line_count_label = QLabel("共 0 条")
+        self.line_count_label.setStyleSheet("color: #aaaaaa; font-size: 12px;")
+        toolbar.addWidget(self.line_count_label)
+
+        toolbar.addStretch()
+
+        # 过滤复选框
+        self.filter_sent_check = QCheckBox("📤 发送")
+        self.filter_sent_check.setChecked(True)
+        self.filter_sent_check.setStyleSheet("color: #4fc3f7; font-size: 11px;")
+        self.filter_sent_check.stateChanged.connect(lambda s: setattr(self, '_show_sent', s == Qt.Checked))
+        toolbar.addWidget(self.filter_sent_check)
+
+        self.filter_recv_check = QCheckBox("📥 接收")
+        self.filter_recv_check.setChecked(True)
+        self.filter_recv_check.setStyleSheet("color: #81c784; font-size: 11px;")
+        self.filter_recv_check.stateChanged.connect(lambda s: setattr(self, '_show_received', s == Qt.Checked))
+        toolbar.addWidget(self.filter_recv_check)
+
+        self.filter_system_check = QCheckBox("⚙️ 系统")
+        self.filter_system_check.setChecked(True)
+        self.filter_system_check.setStyleSheet("color: #ffb74d; font-size: 11px;")
+        self.filter_system_check.stateChanged.connect(lambda s: setattr(self, '_show_system', s == Qt.Checked))
+        toolbar.addWidget(self.filter_system_check)
+
+        self.filter_error_check = QCheckBox("❌ 错误")
+        self.filter_error_check.setChecked(True)
+        self.filter_error_check.setStyleSheet("color: #e57373; font-size: 11px;")
+        self.filter_error_check.stateChanged.connect(lambda s: setattr(self, '_show_error', s == Qt.Checked))
+        toolbar.addWidget(self.filter_error_check)
+
+        self.auto_scroll_check = QCheckBox("自动滚动")
+        self.auto_scroll_check.setChecked(True)
+        self.auto_scroll_check.setStyleSheet("color: #cccccc; font-size: 11px;")
+        self.auto_scroll_check.stateChanged.connect(lambda s: setattr(self, '_auto_scroll', s == Qt.Checked))
+        toolbar.addWidget(self.auto_scroll_check)
+
+        self.clear_btn = QPushButton("🗑️ 清空")
+        self.clear_btn.setStyleSheet(BTN_STYLE_GRAY)
+        self.clear_btn.clicked.connect(self.clear_console)
+        toolbar.addWidget(self.clear_btn)
+
+        layout.addLayout(toolbar)
+
+        # ── 控制台文本区域 ──
+        self.console_text = QTextEdit()
+        self.console_text.setReadOnly(True)
+        self.console_text.setLineWrapMode(QTextEdit.NoWrap)  # 不自动换行，确保长内容完整显示
+        self.console_text.setStyleSheet(
+            "QTextEdit { background-color: #0d0d0d; color: #cccccc; "
+            "border: 1px solid #333333; border-radius: 4px; "
+            "font-family: 'Consolas', 'Courier New', 'Microsoft YaHei'; "
+            "font-size: 11px; padding: 6px; }"
+        )
+        layout.addWidget(self.console_text, 1)  # stretch=1 让文本区域占满剩余空间
+
+        # ── 连接状态栏 ──
+        status_bar = QHBoxLayout()
+        self.connection_status = QLabel("● 未连接")
+        self.connection_status.setStyleSheet("color: #e57373; font-size: 12px; font-weight: bold;")
+        status_bar.addWidget(self.connection_status)
+        status_bar.addStretch()
+        self.msg_stats_label = QLabel("发送: 0 | 接收: 0 | 错误: 0")
+        self.msg_stats_label.setStyleSheet("color: #888888; font-size: 11px;")
+        status_bar.addWidget(self.msg_stats_label)
+        layout.addLayout(status_bar)
+
+        # 统计计数
+        self._sent_count = 0
+        self._recv_count = 0
+        self._error_count = 0
+
+    def _get_timestamp(self) -> str:
+        return datetime.now().strftime("%H:%M:%S.%f")[:-3]
+
+    def _append_line(self, html_line: str):
+        """追加一行到控制台，带行数限制"""
+        self.console_text.append(html_line)
+        self._line_count += 1
+        self.line_count_label.setText(f"共 {self._line_count} 条")
+
+        # 超过最大行数时截断前面的内容
+        if self._line_count > self.MAX_LINES:
+            cursor = self.console_text.textCursor()
+            cursor.movePosition(QTextCursor.Start)
+            cursor.movePosition(QTextCursor.Down, QTextCursor.KeepAnchor, self._line_count - self.MAX_LINES)
+            cursor.removeSelectedText()
+            self._line_count = self.MAX_LINES
+
+        # 自动滚动
+        if self._auto_scroll:
+            cursor = self.console_text.textCursor()
+            cursor.movePosition(QTextCursor.End)
+            self.console_text.setTextCursor(cursor)
+            self.console_text.ensureCursorVisible()
+
+    def _update_stats(self):
+        self.msg_stats_label.setText(
+            f"发送: {self._sent_count} | 接收: {self._recv_count} | 错误: {self._error_count}"
+        )
+
+    def log_sent(self, msg_type: str, data_summary: str):
+        """记录发送的消息"""
+        if not self._show_sent:
+            return
+        self._sent_count += 1
+        self._update_stats()
+        ts = self._get_timestamp()
+        # 对 data_summary 进行 HTML 转义
+        safe_summary = data_summary.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        line = (
+            f'<span style="color:#555555;">[{ts}]</span> '
+            f'<span style="color:#4fc3f7;">📤 SEND</span> '
+            f'<span style="color:#64b5f6;">{msg_type}</span> '
+            f'<span style="color:#90a4ae;">{safe_summary}</span>'
+        )
+        self._append_line(line)
+
+    def log_received(self, msg_type: str, data_summary: str):
+        """记录接收的消息"""
+        if not self._show_received:
+            return
+        self._recv_count += 1
+        self._update_stats()
+        ts = self._get_timestamp()
+        safe_summary = data_summary.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        line = (
+            f'<span style="color:#555555;">[{ts}]</span> '
+            f'<span style="color:#81c784;">📥 RECV</span> '
+            f'<span style="color:#a5d6a7;">{msg_type}</span> '
+            f'<span style="color:#90a4ae;">{safe_summary}</span>'
+        )
+        self._append_line(line)
+
+    def log_system(self, message: str):
+        """记录系统事件"""
+        if not self._show_system:
+            return
+        ts = self._get_timestamp()
+        safe_msg = message.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        line = (
+            f'<span style="color:#555555;">[{ts}]</span> '
+            f'<span style="color:#ffb74d;">⚙️ SYS </span> '
+            f'<span style="color:#ffe0b2;">{safe_msg}</span>'
+        )
+        self._append_line(line)
+
+    def log_error(self, message: str):
+        """记录错误信息"""
+        self._error_count += 1
+        self._update_stats()
+        if not self._show_error:
+            return
+        ts = self._get_timestamp()
+        safe_msg = message.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        line = (
+            f'<span style="color:#555555;">[{ts}]</span> '
+            f'<span style="color:#e57373;">❌ ERR </span> '
+            f'<span style="color:#ef9a9a;">{safe_msg}</span>'
+        )
+        self._append_line(line)
+
+    def log_python_logging(self, message: str, level: int):
+        """记录 Python logging 输出"""
+        if level >= logging.ERROR:
+            self.log_error(message)
+        elif level >= logging.WARNING:
+            if not self._show_system:
+                return
+            ts = self._get_timestamp()
+            safe_msg = message.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            line = (
+                f'<span style="color:#555555;">[{ts}]</span> '
+                f'<span style="color:#fff176;">⚠️ WARN</span> '
+                f'<span style="color:#fff9c4;">{safe_msg}</span>'
+            )
+            self._append_line(line)
+        else:
+            self.log_system(message)
+
+    def set_connected(self, connected: bool):
+        """更新连接状态显示"""
+        if connected:
+            self.connection_status.setText("● 已连接")
+            self.connection_status.setStyleSheet("color: #81c784; font-size: 12px; font-weight: bold;")
+        else:
+            self.connection_status.setText("● 未连接")
+            self.connection_status.setStyleSheet("color: #e57373; font-size: 12px; font-weight: bold;")
+
+    def clear_console(self):
+        """清空控制台"""
+        self.console_text.clear()
+        self._line_count = 0
+        self._sent_count = 0
+        self._recv_count = 0
+        self._error_count = 0
+        self.line_count_label.setText("共 0 条")
+        self._update_stats()
+
+
 # ==================== 创建房间对话框 ====================
 
 class CreateRoomDialog(QDialog):
@@ -1295,6 +1607,11 @@ class AdminMainWindow(QMainWindow):
         self.setup_ui()
         self.setup_styles()
         self.connect_signals()
+        self.setup_logging_redirect()
+        # 参与者列表自动刷新定时器（每 5 秒轮询一次）
+        self.participant_refresh_timer = QTimer(self)
+        self.participant_refresh_timer.setInterval(5000)
+        self.participant_refresh_timer.timeout.connect(self._auto_refresh_participants)
         self.connect_to_server()
 
     def setup_ui(self):
@@ -1366,6 +1683,10 @@ class AdminMainWindow(QMainWindow):
         self.stock_management = StockManagementWidget()
         self.tabs.addTab(self.stock_management, "📈 股票管理")
 
+        # 调试控制台
+        self.debug_console = DebugConsoleWidget()
+        self.tabs.addTab(self.debug_console, "🔧 调试控制台")
+
         right_layout.addWidget(self.tabs)
         splitter.addWidget(right_panel)
         splitter.setStretchFactor(0, 1)
@@ -1398,7 +1719,18 @@ class AdminMainWindow(QMainWindow):
         self.stock_management.remove_from_room_signal.connect(self.on_remove_stock_from_room)
         self.stock_management.list_room_stocks_signal.connect(self.on_list_room_stocks)
 
+    def setup_logging_redirect(self):
+        """将 Python logging 输出重定向到调试控制台"""
+        qt_handler = QtLogHandler(self.debug_console.log_python_logging)
+        qt_handler.setFormatter(logging.Formatter('%(name)s - %(message)s'))
+        qt_handler.setLevel(logging.DEBUG)
+        # 添加到根 logger，捕获所有模块的日志
+        root_logger = logging.getLogger()
+        root_logger.addHandler(qt_handler)
+        self.debug_console.log_system("调试控制台已启动，正在捕获所有日志输出...")
+
     def connect_to_server(self):
+        self.debug_console.log_system(f"正在连接到服务器 ws://{HOST}:{PORT} ...")
         self.ws_client = WebSocketClientThread(HOST, PORT)
         self.ws_client.connected_signal.connect(self.on_connected)
         self.ws_client.disconnected_signal.connect(self.on_disconnected)
@@ -1409,20 +1741,43 @@ class AdminMainWindow(QMainWindow):
     def on_connected(self):
         self.connected = True
         self.statusBar().showMessage("已连接到服务器", 5000)
+        self.debug_console.set_connected(True)
+        self.debug_console.log_system(f"已成功连接到服务器 ws://{HOST}:{PORT}")
         self.request_room_list()
         self.on_list_stocks()
 
     def on_disconnected(self):
         self.connected = False
         self.statusBar().showMessage("与服务器断开连接", 5000)
+        self.debug_console.set_connected(False)
+        self.debug_console.log_error("与服务器断开连接")
+        self._stop_participant_refresh_timer()
 
     def on_connection_error(self, error: str):
         self.connected = False
         self.statusBar().showMessage(error, 10000)
+        self.debug_console.set_connected(False)
+        self.debug_console.log_error(f"连接错误: {error}")
+
+    def _summarize_data(self, data: dict, max_len: int = 200) -> str:
+        """生成消息数据的摘要，用于调试控制台显示"""
+        try:
+            summary = json.dumps(data, ensure_ascii=False, separators=(',', ':'))
+            if len(summary) > max_len:
+                return summary[:max_len] + "..."
+            return summary
+        except Exception:
+            return str(data)[:max_len]
 
     def on_message_received(self, message: dict):
         msg_type = message.get("type")
         data = message.get("data", {})
+
+        # 记录到调试控制台
+        self.debug_console.log_received(
+            msg_type or "UNKNOWN",
+            self._summarize_data(data)
+        )
 
         if msg_type == MessageType.ROOM_LIST.value:
             self.update_room_list(data.get("rooms", []))
@@ -1431,6 +1786,7 @@ class AdminMainWindow(QMainWindow):
             QTimer.singleShot(300, self.request_room_list)
         elif msg_type == MessageType.ERROR.value:
             self.statusBar().showMessage(f"错误：{data.get('error', '未知错误')}", 5000)
+            self.debug_console.log_error(f"服务器返回错误: {data.get('error', '未知错误')}")
         elif msg_type == MessageType.STOCK_LIST.value:
             self.stock_management.update_global_stocks(data.get("stocks", []))
         elif msg_type == MessageType.ROOM_STOCK_LIST.value:
@@ -1442,11 +1798,24 @@ class AdminMainWindow(QMainWindow):
             if data.get("room_id") == self.current_room_id:
                 self.robot_management.update_room_robots(data.get("robots", []))
         elif msg_type == MessageType.ROOM_PARTICIPANT_LIST.value:
-            if data.get("room_id") == self.current_room_id:
-                self.room_control.update_participants(
-                    data.get("users", []),
-                    data.get("robots", [])
-                )
+            recv_room_id = data.get("room_id")
+            users = data.get("users", [])
+            robots = data.get("robots", [])
+            self.debug_console.log_system(
+                f"收到参与者列表: room_id={recv_room_id}, "
+                f"current_room_id={self.current_room_id}, "
+                f"匹配={'是' if recv_room_id == self.current_room_id else '否'}, "
+                f"真人={len(users)}, 机器人={len(robots)}"
+            )
+            if recv_room_id == self.current_room_id:
+                self.room_control.update_participants(users, robots)
+        elif msg_type == MessageType.STEP_READY_UPDATE.value:
+            recv_room_id = data.get("room_id")
+            if recv_room_id == self.current_room_id:
+                users_info = data.get("users", [])
+                ready_count = data.get("ready_count", 0)
+                total_count = data.get("total_count", 0)
+                self.room_control.update_ready_status(users_info, ready_count, total_count)
         elif msg_type == MessageType.OPERATION_LOG.value:
             room_id = data.get("room_id")
             if room_id == self.current_room_id:
@@ -1459,9 +1828,21 @@ class AdminMainWindow(QMainWindow):
 
     def send_message(self, message):
         if self.ws_client and self.connected:
+            # 记录到调试控制台
+            try:
+                if isinstance(message, str):
+                    parsed = json.loads(message)
+                else:
+                    parsed = message
+                msg_type = parsed.get("type", "UNKNOWN")
+                data = parsed.get("data", {})
+                self.debug_console.log_sent(msg_type, self._summarize_data(data))
+            except Exception:
+                self.debug_console.log_sent("RAW", str(message)[:200])
             self.ws_client.send_message(message)
         else:
             self.statusBar().showMessage("未连接到服务器", 3000)
+            self.debug_console.log_error("发送失败: 未连接到服务器")
 
     def request_room_list(self):
         self.send_message(create_message(MessageType.ROOM_LIST, {}))
@@ -1557,14 +1938,33 @@ class AdminMainWindow(QMainWindow):
         self.send_message(create_message(MessageType.ADMIN_LIST_ROOM_STOCKS, {"room_id": room_id}))
 
     def update_room_list(self, rooms: List[dict]):
+        prev_room_id = self.current_room_id
         self.rooms_data = {room["id"]: room for room in rooms}
+
+        # 阻塞信号，防止重建列表时误触发 on_room_selected
+        self.room_list.blockSignals(True)
         self.room_list.setRowCount(len(rooms))
         for row, room in enumerate(rooms):
-            self.room_list.setItem(row, 0, QTableWidgetItem(room.get("name", "")))
+            name_item = QTableWidgetItem(room.get("name", ""))
+            name_item.setData(Qt.UserRole, room["id"])  # 将 room_id 存入 item，避免依赖 dict 顺序
+            self.room_list.setItem(row, 0, name_item)
             self.room_list.setItem(row, 1, QTableWidgetItem(room.get("step_mode", "")))
             self.room_list.setItem(row, 2, QTableWidgetItem(room.get("status", "")))
             self.room_list.setItem(row, 3, QTableWidgetItem(str(room.get("user_count", 0))))
             self.room_list.setItem(row, 4, QTableWidgetItem(str(room.get("robot_count", 0))))
+
+        # 恢复之前的选中状态（静默恢复，不触发 on_room_selected）
+        if prev_room_id and prev_room_id in self.rooms_data:
+            for row in range(self.room_list.rowCount()):
+                item = self.room_list.item(row, 0)
+                if item and item.data(Qt.UserRole) == prev_room_id:
+                    self.room_list.selectRow(row)
+                    break
+            # 用最新数据刷新房间信息标签（状态/步数/模式可能已变化）
+            self.room_control.set_room(prev_room_id, self.rooms_data[prev_room_id])
+
+        self.room_list.blockSignals(False)
+
         rooms_dict = {room["id"]: room.get("name", "Unknown") for room in rooms}
         self.news_publisher.update_rooms(rooms_dict)
         self.report_publisher.update_rooms(rooms_dict)
@@ -1574,10 +1974,18 @@ class AdminMainWindow(QMainWindow):
         if not selected:
             return
         row = selected[0].row()
-        room_ids = list(self.rooms_data.keys())
-        if row >= len(room_ids):
+        name_item = self.room_list.item(row, 0)
+        if not name_item:
             return
-        room_id = room_ids[row]
+        # 从 item 数据中读取 room_id，避免依赖 dict 键顺序
+        room_id = name_item.data(Qt.UserRole)
+        if not room_id:
+            return
+
+        # 若选中的是同一个房间，跳过（避免重复请求）
+        if room_id == self.current_room_id:
+            return
+
         room_info = self.rooms_data.get(room_id, {})
         self.current_room_id = room_id
 
@@ -1594,7 +2002,27 @@ class AdminMainWindow(QMainWindow):
         self.on_list_room_participants(room_id)
         self.on_get_operation_log(room_id)
 
+        # 启动参与者列表自动刷新定时器
+        self._start_participant_refresh_timer()
+
+    def _auto_refresh_participants(self):
+        """定时自动刷新参与者列表（每 5 秒）"""
+        if self.current_room_id and self.connected:
+            self.on_list_room_participants(self.current_room_id)
+
+    def _start_participant_refresh_timer(self):
+        """启动参与者列表自动刷新定时器"""
+        if not self.participant_refresh_timer.isActive():
+            self.participant_refresh_timer.start()
+            self.debug_console.log_system("参与者列表自动刷新已启动（每 5 秒）")
+
+    def _stop_participant_refresh_timer(self):
+        """停止参与者列表自动刷新定时器"""
+        if self.participant_refresh_timer.isActive():
+            self.participant_refresh_timer.stop()
+
     def closeEvent(self, event):
+        self._stop_participant_refresh_timer()
         if self.ws_client:
             self.ws_client.stop()
             self.ws_client.wait(2000)
@@ -1616,7 +2044,10 @@ def run_admin_ui():
         "QDoubleSpinBox { background-color: #3c3c3c; color: #ffffff; border: 1px solid #555555; border-radius: 4px; padding: 6px; }"
         "QSpinBox { background-color: #3c3c3c; color: #ffffff; border: 1px solid #555555; border-radius: 4px; padding: 6px; }"
         "QScrollBar:vertical { background-color: #2b2b2b; width: 12px; }"
-        "QScrollBar::handle:vertical { background-color: #555555; border-radius: 6px; }"
+        "QScrollBar::handle:vertical { background-color: #555555; border-radius: 6px; min-height: 20px; }"
+        "QScrollBar:horizontal { background-color: #2b2b2b; height: 12px; }"
+        "QScrollBar::handle:horizontal { background-color: #555555; border-radius: 6px; min-width: 20px; }"
+        "QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }"
         "QCheckBox { color: #cccccc; }"
         "QDialog { background-color: #2b2b2b; }"
         "QStatusBar { background-color: #1e1e1e; color: #aaaaaa; }"

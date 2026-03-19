@@ -289,6 +289,51 @@ class WebSocketClient:
             logger.error("Cancel order timeout")
         
         return result["success"]
+
+    async def modify_order(self, order_id: str, new_quantity: Optional[int] = None,
+                           new_price: Optional[float] = None) -> bool:
+        """
+        修改订单。
+
+        Args:
+            order_id: 订单 ID
+            new_quantity: 新数量（None 表示不修改）
+            new_price: 新价格（None 表示不修改）
+
+        Returns:
+            修改是否成功
+        """
+        modify_event = asyncio.Event()
+        result = {"success": False}
+
+        def handle_response(data: Dict[str, Any]) -> None:
+            result["success"] = True
+            logger.info(f"Order modified: {order_id}")
+            modify_event.set()
+
+        def handle_error(data: Dict[str, Any]) -> None:
+            logger.error(f"Modify order error: {data.get('error')}")
+            modify_event.set()
+
+        # 临时注册处理器
+        self.message_handlers["SUCCESS"] = handle_response
+        self.message_handlers["ERROR"] = handle_error
+
+        payload: Dict[str, Any] = {"order_id": order_id}
+        if new_quantity is not None:
+            payload["new_quantity"] = new_quantity
+        if new_price is not None:
+            payload["new_price"] = new_price
+
+        await self.send_message(MessageType.MODIFY_ORDER, payload)
+
+        # 等待响应
+        try:
+            await asyncio.wait_for(modify_event.wait(), timeout=10)
+        except asyncio.TimeoutError:
+            logger.error("Modify order timeout")
+
+        return result["success"]
     
     async def mark_ready(self) -> bool:
         """
@@ -440,6 +485,8 @@ class WebSocketClient:
             result["room_id"] = data.get("room_id")
             result["name"] = data.get("name", "")
             result["step_mode"] = data.get("step_mode", "day")
+            result["stocks"] = data.get("stocks", [])
+            result["account"] = data.get("account", {})
             self.room_id = data.get("room_id")
             logger.info(f"Joined room {self.room_id}")
             join_event.set()
@@ -464,7 +511,9 @@ class WebSocketClient:
             return {
                 "room_id": result["room_id"],
                 "name": result["name"],
-                "step_mode": result["step_mode"]
+                "step_mode": result["step_mode"],
+                "stocks": result["stocks"],
+                "account": result["account"]
             }
         return None
     

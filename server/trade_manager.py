@@ -235,6 +235,42 @@ class TradeManager:
             
         order.status = OrderStatus.CANCELLED
         return True
+
+    def modify_order(
+        self,
+        order_id: str,
+        new_quantity: Optional[int] = None,
+        new_price: Optional[float] = None
+    ) -> bool:
+        """
+        修改订单数量或价格（仅限活跃订单）
+        
+        Args:
+            order_id: 订单 ID
+            new_quantity: 新数量（None 表示不修改）
+            new_price: 新价格（None 表示不修改）
+            
+        Returns:
+            是否成功
+        """
+        order = self.orders.get(order_id)
+        if not order or not order.is_active():
+            return False
+
+        if new_quantity is not None:
+            if new_quantity <= 0:
+                return False
+            # 新数量不能小于已成交数量
+            if new_quantity < order.filled_quantity:
+                return False
+            order.quantity = new_quantity
+
+        if new_price is not None:
+            if new_price <= 0:
+                return False
+            order.price = new_price
+
+        return True
         
     def match_orders(self, stock_code: str, market_price: float) -> List[Trade]:
         """
